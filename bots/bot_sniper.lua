@@ -4255,6 +4255,371 @@ function Logic.UseRefresher2(bb)
     return BT.FAILURE
 end
 
+-- =========================================================================
+-- ЛОГИКА: LANE EQUILIBRIUM ADVANCED
+-- =========================================================================
+function Logic.LaneEquilibriumAdvanced(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local allyCreeps = bb:Get("TacticalState", "NearbyAllyCreeps") or {}
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end
+
+    -- если союзных крипов больше — атакуем вражеских (пушим)
+    if #allyCreeps > #enemyCreeps + 1 then
+        local t = FindLowestHPUnit(enemyCreeps)
+        if t ~= nil then
+            bot:Action_AttackUnit(t, true)
+            return BT.RUNNING
+        end
+    end
+    -- если вражеских больше — фризим (не атакуем крипов, стоим)
+    if #enemyCreeps > #allyCreeps + 2 then
+        return BT.SUCCESS  -- стоим, ждём
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: CREEP AGGRO CONTROL
+-- =========================================================================
+function Logic.CreepAggroControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local enemyHeroes = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemyHeroes == 0 then return BT.FAILURE end
+    -- если враг рядом, атакуем крипа чтобы не тащить аггро на себя
+    local t = FindLowestHPUnit(enemyCreeps)
+    if t ~= nil then
+        bot:Action_AttackUnit(t, true)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: SMART RETREAT
+-- =========================================================================
+function Logic.SmartRetreat(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local threshold = bb:Get("SelfState", "RetreatThreshold") or 0.3
+    if hp > threshold then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies == 0 then return BT.FAILURE end
+
+    -- ищем безопасный путь к фонтану
+    local fountain = GetFountainLoc(bot)
+    if fountain == nil then return BT.FAILURE end
+
+    -- если есть TP — используем
+    local tp, _ = HasItem(bot, "item_tpscroll")
+    if tp ~= nil and tp:GetCooldownTimeRemaining() <= 0 then
+        bot:Action_UseAbilityOnLocation(tp, fountain)
+        return BT.RUNNING
+    end
+
+    -- иначе бежим
+    bot:Action_MoveToLocation(fountain)
+    return BT.RUNNING
+end
+
+-- =========================================================================
+-- ЛОГИКА: INITIATION (инициация боя)
+-- =========================================================================
+function Logic.Initiation(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.6 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    if #enemies == 0 then return BT.FAILURE end
+    if #allies < 2 then return BT.FAILURE end
+
+    -- Sniper не инициирует, но может помочь с Shrapnel
+    local shrapnel = FindAbility(bot, ABILITY_SHRAPNEL)
+    if shrapnel ~= nil and shrapnel:GetLevel() > 0
+       and shrapnel:GetCooldownTimeRemaining() <= 0
+       and bot:GetMana() >= shrapnel:GetManaCost() then
+        local target = bb:Get("TacticalState", "TargetEnemyHero")
+        if target ~= nil and target:IsAlive() then
+            local dist = Distance(bot:GetLocation(), target:GetLocation())
+            if dist <= shrapnel:GetCastRange() then
+                bot:Action_UseAbilityOnLocation(shrapnel, target:GetLocation())
+                return BT.RUNNING
+            end
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: PEELING (защита керри/саппортов)
+-- =========================================================================
+function Logic.Peeling(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies == 0 then return BT.FAILURE end
+
+    -- ищем союзника с низким HP
+    local lowAlly = nil
+    for i = 1, #allies do
+        local a = allies[i]
+        if a ~= nil and a:IsAlive() then
+            if a:GetHealth() / a:GetMaxHealth() < 0.3 then
+                lowAlly = a
+                break
+            end
+        end
+    end
+    if lowAlly == nil then return BT.FAILURE end
+
+    -- атакуем врага, ближайшего к этому союзнику
+    local nearestEnemy = nil
+    local nearDist = 1e9
+    for i = 1, #enemies do
+        local e = enemies[i]
+        if e ~= nil and e:IsAlive() then
+            local d = Distance(e:GetLocation(), lowAlly:GetLocation())
+            if d < nearDist then nearDist = d; nearestEnemy = e end
+        end
+    end
+    if nearestEnemy ~= nil then
+        local dist = Distance(bot:GetLocation(), nearestEnemy:GetLocation())
+        local attackRange = bb:Get("SelfState", "AttackRange") or 550
+        if dist <= attackRange then
+            bot:Action_AttackUnit(nearestEnemy, true)
+            return BT.RUNNING
+        else
+            bot:Action_MoveToLocation(nearestEnemy:GetLocation())
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: VISION CONTROL
+-- =========================================================================
+function Logic.VisionControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- проверяем, есть ли варды
+    local hasWard = false
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil and it:GetName() == "item_ward_observer" then hasWard = true; break end
+    end
+    if not hasWard then return BT.FAILURE end
+    -- ставим вард в ключевой точке если нет видимости
+    local spots = {
+        Vector(-3000, 0, 0), Vector(3000, 0, 0),
+        Vector(0, 3000, 0), Vector(0, -3000, 0),
+        Vector(-1500, 1500, 0), Vector(1500, -1500, 0),
+    }
+    local myPos = bot:GetLocation()
+    local bestSpot, bestDist = nil, 1e9
+    for i = 1, #spots do
+        local sp = spots[i]
+        local d = Distance(myPos, sp)
+        if d < bestDist and d <= 2000 then
+            local vis = true
+            local ok, v = pcall(IsLocationVisible, sp)
+            if ok then vis = v end
+            if not vis then
+                bestDist = d
+                bestSpot = sp
+            end
+        end
+    end
+    if bestSpot == nil then return BT.FAILURE end
+    local wardItem = nil
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil and it:GetName() == "item_ward_observer" then wardItem = it; break end
+    end
+    if wardItem == nil then return BT.FAILURE end
+    if Distance(myPos, bestSpot) <= 500 then
+        bot:Action_UseAbilityOnLocation(wardItem, bestSpot)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(bestSpot)
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: ECONOMY OPTIMIZATION
+-- =========================================================================
+function Logic.EconomyOptimization(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local gold = bb:Get("SelfState", "Gold") or 0
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    -- если золота много и нет предметов для покупки — копим
+    local needBuy = false
+    for _, itemName in ipairs(ITEM_BUILD) do
+        local it, _ = HasItem(bot, itemName)
+        if it == nil then
+            local cost = ItemCost(itemName)
+            if gold >= cost then needBuy = true; break end
+        end
+    end
+    if not needBuy then
+        bb:Set("MacroState", "SavingGold", true)
+    else
+        bb:Set("MacroState", "SavingGold", false)
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: ITEM EFFICIENCY
+-- =========================================================================
+function Logic.ItemEfficiency(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local totalValue = 0
+    for i = 0, 5 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil then
+            totalValue = totalValue + ItemCost(it:GetName())
+        end
+    end
+    bb:Set("SelfState", "ItemValue", totalValue)
+    return totalValue
+end
+
+-- =========================================================================
+-- ЛОГИКА: HERO POWER SPIKE
+-- =========================================================================
+function Logic.HeroPowerSpike(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return false end
+    local level = bb:Get("SelfState", "Level") or 1
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    -- Sniper power spike: level 6 (assassinate), level 11, level 16
+    local isSpike = (level == 6 or level == 11 or level == 16)
+    bb:Set("SelfState", "PowerSpike", isSpike)
+    return isSpike
+end
+
+-- =========================================================================
+-- ЛОГИКА: AGGRESSION LEVEL
+-- =========================================================================
+function Logic.AggressionLevel(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local level = bb:Get("SelfState", "Level") or 1
+    local gold = bb:Get("SelfState", "Gold") or 0
+    local aggro = 0
+    if hp > 0.7 then aggro = aggro + 3 end
+    if level >= 6 then aggro = aggro + 2 end
+    if gold > 1000 then aggro = aggro + 1 end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    if #allies > #enemies then aggro = aggro + 2 end
+    if #enemies > #allies then aggro = aggro - 2 end
+    bb:Set("SelfState", "AggressionLevel", aggro)
+    return aggro
+end
+
+-- =========================================================================
+-- ЛОГИКА: DEFENSIVE LEVEL
+-- =========================================================================
+function Logic.DefensiveLevel(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local threat = bb:Get("TacticalState", "ActiveThreatLevel") or 0
+    local def = 0
+    if hp < 0.4 then def = def + 3 end
+    if threat >= 3 then def = def + 2 end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    if #enemies > #allies then def = def + 2 end
+    bb:Set("SelfState", "DefensiveLevel", def)
+    return def
+end
+
+-- =========================================================================
+-- ЛОГИКА: FARM PRIORITY SCORE
+-- =========================================================================
+function Logic.FarmPriorityScore(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local neutrals = bb:Get("TacticalState", "NearbyNeutralCreeps") or {}
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if #enemies > 0 then return 0 end
+    if hp < 0.4 then return 0 end
+    local score = #enemyCreeps * 15 + #neutrals * 8
+    bb:Set("SelfState", "FarmPriorityScore", score)
+    return score
+end
+
+-- =========================================================================
+-- ЛОГИКА: KILL PRIORITY SCORE
+-- =========================================================================
+function Logic.KillPriorityScore(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local killProb = bb:Get("TacticalState", "KillProbability") or 0
+    local score = 0
+    if #enemies > 0 then
+        score = killProb * 100
+        local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+        if #allies >= #enemies then score = score + 20 end
+    end
+    bb:Set("SelfState", "KillPriorityScore", score)
+    return score
+end
+
+-- =========================================================================
+-- ЛОГИКА: OBJECTIVE PRIORITY SCORE
+-- =========================================================================
+function Logic.ObjectivePriorityScore(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    local score = 0
+    -- ранняя игра: фарм
+    if time < 900 then score = 10 end
+    -- мидгейм: объективы
+    if time >= 900 and time < 2100 then score = 50 end
+    -- лейтгейм: трон
+    if time >= 2100 then score = 80 end
+    bb:Set("SelfState", "ObjectivePriorityScore", score)
+    return score
+end
+
+-- =========================================================================
+-- ЛОГИКА: DECISION MAKING ENGINE
+-- =========================================================================
+function Logic.DecisionEngine(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return "IDLE" end
+    local farmScore = bb:Get("SelfState", "FarmPriorityScore") or 0
+    local killScore = bb:Get("SelfState", "KillPriorityScore") or 0
+    local objScore = bb:Get("SelfState", "ObjectivePriorityScore") or 0
+    local aggro = bb:Get("SelfState", "AggressionLevel") or 0
+    local def = bb:Get("SelfState", "DefensiveLevel") or 0
+
+    if def >= 4 then return "RETREAT" end
+    if killScore > 60 and aggro >= 3 then return "KILL" end
+    if objScore > 60 then return "OBJECTIVE" end
+    if farmScore > 30 then return "FARM" end
+    return "LANE"
+end
+
 function Think()
     if not InitializeBot() then return end
     SyncBlackboard()
@@ -4268,6 +4633,15 @@ function Think()
     Logic.DynamicRetreatThreshold(Blackboard)
     Logic.FarmEfficiencyScore(Blackboard)
     Logic.KillProbability(Blackboard)
+    Logic.HeroPowerSpike(Blackboard)
+    Logic.AggressionLevel(Blackboard)
+    Logic.DefensiveLevel(Blackboard)
+    Logic.FarmPriorityScore(Blackboard)
+    Logic.KillPriorityScore(Blackboard)
+    Logic.ObjectivePriorityScore(Blackboard)
+    Logic.DecisionEngine(Blackboard)
+    Logic.EconomyOptimization(Blackboard)
+    Logic.ItemEfficiency(Blackboard)
     Logic.UpdateMacro(Blackboard)
     Logic.DynamicItemBuild(Blackboard)
     Logic.AdaptItemBuild(Blackboard)
@@ -4325,6 +4699,12 @@ function Think()
     Logic.UseSmoke(Blackboard)
     Logic.UseRefresher2(Blackboard)
     Logic.EnemyAbilityAwareness(Blackboard)
+    Logic.VisionControl(Blackboard)
+    Logic.Peeling(Blackboard)
+    Logic.Initiation(Blackboard)
+    Logic.SmartRetreat(Blackboard)
+    Logic.CreepAggroControl(Blackboard)
+    Logic.LaneEquilibriumAdvanced(Blackboard)
     if rootTree ~= nil then
         rootTree:Tick(thisBot, Blackboard)
     end
