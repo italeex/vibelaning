@@ -13,11 +13,12 @@
       - Map awareness: пропавшие враги, отступление при ганке, защита базы.
 ]]
 
-require("blackboard")
-require("behavior_tree")
+local sScriptPath = GetScriptDirectory and GetScriptDirectory() or ""
+require(sScriptPath .. "blackboard")
+require(sScriptPath .. "behavior_tree")
 
-local Blackboard = require("blackboard")
-local BT         = require("behavior_tree")
+local Blackboard = require(sScriptPath .. "blackboard")
+local BT         = require(sScriptPath .. "behavior_tree")
 
 local thisBot = nil
 local rootTree = nil
