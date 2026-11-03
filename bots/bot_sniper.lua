@@ -4620,6 +4620,161 @@ function Logic.DecisionEngine(bb)
     return "LANE"
 end
 
+-- =========================================================================
+-- ЛОГИКА: COUNTER-PICK AWARENESS
+-- =========================================================================
+function Logic.CounterPickAwareness(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local enemies = {}
+    local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ENEMY_HEROES) end)
+    if ok and units ~= nil then
+        for i = 1, #units do
+            local u = units[i]
+            if u ~= nil and u:IsAlive() then table.insert(enemies, u:GetName()) end
+        end
+    end
+    -- если враги имеют BKB-piercing станы — приоритет BKB
+    local needBKB = false
+    for i = 1, #enemies do
+        local n = enemies[i] or ""
+        if string.find(n, "doom") or string.find(n, "beastmaster") or string.find(n, "batrider") then
+            needBKB = true
+        end
+    end
+    bb:Set("MacroState", "NeedBKB", needBKB)
+end
+
+-- =========================================================================
+-- ЛОГИКА: DAMAGE MITIGATION
+-- =========================================================================
+function Logic.DamageMitigation(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies == 0 then return BT.FAILURE end
+    -- если враг кастует способность — уклоняемся (move)
+    for i = 1, #enemies do
+        local e = enemies[i]
+        if e ~= nil and e:IsAlive() and e:IsUsingAbility() then
+            local away = bot:GetLocation() + (bot:GetLocation() - e:GetLocation()):Normalized() * 400
+            bot:Action_MoveToLocation(away)
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: SAVE ALLY (спасение союзника)
+-- =========================================================================
+function Logic.SaveAlly(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies == 0 then return BT.FAILURE end
+    -- ищем союзника с критически низким HP
+    local targetAlly = nil
+    for i = 1, #allies do
+        local a = allies[i]
+        if a ~= nil and a:IsAlive() and a:GetHealth() / a:GetMaxHealth() < 0.2 then
+            targetAlly = a
+            break
+        end
+    end
+    if targetAlly == nil then return BT.FAILURE end
+    -- атакуем врага, бьющего союзника
+    local nearestEnemy = nil
+    local nearDist = 1e9
+    for i = 1, #enemies do
+        local e = enemies[i]
+        if e ~= nil and e:IsAlive() then
+            local d = Distance(e:GetLocation(), targetAlly:GetLocation())
+            if d < nearDist then nearDist = d; nearestEnemy = e end
+        end
+    end
+    if nearestEnemy ~= nil then
+        local dist = Distance(bot:GetLocation(), nearestEnemy:GetLocation())
+        local attackRange = bb:Get("SelfState", "AttackRange") or 550
+        if dist <= attackRange then
+            bot:Action_AttackUnit(nearestEnemy, true)
+            return BT.RUNNING
+        else
+            bot:Action_MoveToLocation(nearestEnemy:GetLocation())
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: TOWER DIVE (дайв под башню)
+-- =========================================================================
+function Logic.TowerDive(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.7 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local enemyTowers = bb:Get("TacticalState", "NearbyEnemyTowers") or {}
+    if #enemies == 0 then return BT.FAILURE end
+    if #enemyTowers == 0 then return BT.FAILURE end
+    -- если цель убиваема и мы можем выжить под башней
+    local target = bb:Get("TacticalState", "KillTarget")
+    if target == nil then return BT.FAILURE end
+    local targetHP = target:GetHealth() / target:GetMaxHealth()
+    if targetHP > 0.3 then return BT.FAILURE end
+    local burst = bb:Get("SelfState", "BurstDamage") or 0
+    if burst < target:GetHealth() then return BT.FAILURE end
+    -- дайвим
+    local dist = Distance(bot:GetLocation(), target:GetLocation())
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    if dist <= attackRange then
+        bot:Action_AttackUnit(target, true)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(target:GetLocation())
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: RETREAT PATH (безопасный путь отступления)
+-- =========================================================================
+function Logic.RetreatPath(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp > 0.3 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies == 0 then return BT.FAILURE end
+    local fountain = GetFountainLoc(bot)
+    if fountain == nil then return BT.FAILURE end
+    -- двигаемся к фонтану, избегая врагов
+    local myPos = bot:GetLocation()
+    local toFountain = (fountain - myPos):Normalized()
+    local safePos = myPos + toFountain * 400
+    -- проверяем, не ведёт ли путь через врагов
+    local blocked = false
+    for i = 1, #enemies do
+        local e = enemies[i]
+        if e ~= nil and e:IsAlive() then
+            if Distance(e:GetLocation(), safePos) < 600 then
+                blocked = true
+                break
+            end
+        end
+    end
+    if blocked then
+        -- обходим
+        local perp = Vector(-toFountain.y, toFountain.x, 0)
+        safePos = myPos + perp * 400
+    end
+    bot:Action_MoveToLocation(safePos)
+    return BT.RUNNING
+end
+
 function Think()
     if not InitializeBot() then return end
     SyncBlackboard()
