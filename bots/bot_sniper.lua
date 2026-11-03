@@ -1656,6 +1656,269 @@ end
 -- =========================================================================
 -- ENGINE HOOKS
 -- =========================================================================
+-- =========================================================================
+-- ЛОГИКА: BLINK INITIATION
+-- =========================================================================
+function Logic.BlinkInitiate(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local blink, _ = HasItem(bot, "item_blink")
+    if blink == nil then return BT.FAILURE end
+    if blink:GetCooldownTimeRemaining() > 0 then return BT.FAILURE end
+    local target = bb:Get("TacticalState", "KillTarget")
+    if target == nil then return BT.FAILURE end
+    local myPos = bot:GetLocation()
+    local tPos = target:GetLocation()
+    local dist = Distance(myPos, tPos)
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    -- блинкуем если цель вне радиуса атаки но в радиусе блинка
+    if dist > attackRange + 100 and dist <= 1200 then
+        local blinkPos = tPos + (myPos - tPos):Normalized() * (attackRange - 100)
+        pcall(function() bot:Action_UseAbilityOnLocation(blink, blinkPos) end)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: REFRESHER USAGE
+-- =========================================================================
+function Logic.UseRefresher(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local ref, _ = HasItem(bot, "item_refresher")
+    if ref == nil then return BT.FAILURE end
+    if ref:GetCooldownTimeRemaining() > 0 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    -- используем если в бою и HP достаточно
+    if #enemies >= 2 and hp > 0.5 then
+        -- проверяем что assassinate на кд
+        local assassinate = FindAbility(bot, ABILITY_ASSASSINATE)
+        if assassinate ~= nil and assassinate:GetCooldownTimeRemaining() > 5 then
+            pcall(function() bot:Action_UseAbility(ref) end)
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: MOON SHARD USAGE
+-- =========================================================================
+function Logic.UseMoonShard(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local ms, _ = HasItem(bot, "item_moon_shard")
+    if ms == nil then return BT.FAILURE end
+    -- используем если не на максте атакспида
+    local ok, as = pcall(function() return bot:GetAttackSpeed() end)
+    if ok and type(as) == "number" and as < 400 then
+        pcall(function() bot:Action_UseAbilityOnEntity(ms, bot) end)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: CHEESE USAGE
+-- =========================================================================
+function Logic.UseCheese(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local cheese, _ = HasItem(bot, "item_cheese")
+    if cheese == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local mp = bb:Get("SelfState", "MP") or 1.0
+    if hp < 0.3 or mp < 0.3 then
+        pcall(function() bot:Action_UseAbility(cheese) end)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: AEGIS PICKUP
+-- =========================================================================
+function Logic.PickupAegis(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- ищем Aegis на земле
+    local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ALL) end)
+    if not ok or units == nil then return BT.FAILURE end
+    for i = 1, #units do
+        local u = units[i]
+        if u ~= nil and u:GetName() == "item_aegis" then
+            local d = Distance(bot:GetLocation(), u:GetLocation())
+            if d <= 300 then
+                bot:Action_PickUpItem(u)
+                return BT.RUNNING
+            elseif d <= 1500 then
+                bot:Action_MoveToLocation(u:GetLocation())
+                return BT.RUNNING
+            end
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: HIGH GROUND ADVANTAGE
+-- =========================================================================
+function Logic.HighGround(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local myPos = bot:GetLocation()
+    -- проверяем высоту (Z координата)
+    local highGround = myPos.z > 100
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if highGround and #enemies > 0 then
+        -- держим позицию, не спускаемся
+        return BT.SUCCESS
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: PRECISE KILL COMBO
+-- =========================================================================
+function Logic.PreciseKillCombo(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local target = bb:Get("TacticalState", "KillTarget")
+    if target == nil or not target:IsAlive() then return BT.FAILURE end
+    local myPos = bot:GetLocation()
+    local tPos = target:GetLocation()
+    local dist = Distance(myPos, tPos)
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+
+    -- Комбо: Shrapnel -> Assassinate -> атаки
+    local shrapnel = FindAbility(bot, ABILITY_SHRAPNEL)
+    local assassinate = FindAbility(bot, ABILITY_ASSASSINATE)
+
+    -- 1. Shrapnel если в радиусе
+    if shrapnel ~= nil and shrapnel:GetLevel() > 0
+       and shrapnel:GetCooldownTimeRemaining() <= 0
+       and bot:GetMana() >= shrapnel:GetManaCost()
+       and dist <= shrapnel:GetCastRange() then
+        bot:Action_UseAbilityOnLocation(shrapnel, tPos)
+        return BT.RUNNING
+    end
+
+    -- 2. Assassinate если в радиусе и видим
+    if assassinate ~= nil and assassinate:GetLevel() > 0
+       and assassinate:GetCooldownTimeRemaining() <= 0
+       and bot:GetMana() >= assassinate:GetManaCost()
+       and dist <= assassinate:GetCastRange()
+       and target:IsVisible() then
+        bot:Action_UseAbilityOnEntity(assassinate, target)
+        return BT.RUNNING
+    end
+
+    -- 3. Атака
+    if dist <= attackRange + 60 then
+        bot:Action_AttackUnit(target, true)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(tPos)
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: DENY TOWER
+-- =========================================================================
+function Logic.DenyTower(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local allyTowers = bb:Get("TacticalState", "NearbyAllyTowers") or {}
+    for i = 1, #allyTowers do
+        local t = allyTowers[i]
+        if t ~= nil and t:IsAlive() then
+            local hpPct = t:GetHealth() / t:GetMaxHealth()
+            if hpPct < 0.15 then
+                local d = Distance(bot:GetLocation(), t:GetLocation())
+                local attackRange = bb:Get("SelfState", "AttackRange") or 550
+                if d <= attackRange + 60 then
+                    bot:Action_AttackUnit(t, true)
+                    return BT.RUNNING
+                end
+            end
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: CREEP BLOCK (блокировка крипов при старте)
+-- =========================================================================
+function Logic.CreepBlock(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    if time > 30 then return BT.FAILURE end
+    -- блокируем крипов: двигаемся навстречу крип-вейву
+    local allyCreeps = bb:Get("TacticalState", "NearbyAllyCreeps") or {}
+    if #allyCreeps > 0 then
+        local c = allyCreeps[1]
+        local cLoc = c:GetLocation()
+        -- двигаемся чуть вперед крипа
+        local forward = cLoc + (cLoc - bot:GetLocation()):Normalized() * 100
+        bot:Action_MoveToLocation(forward)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: WARD SPOT OPTIMIZATION
+-- =========================================================================
+function Logic.OptimalWardSpot(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- расширенный список точек вардов
+    local spots = {
+        Vector(-5800, -3800, 256), Vector(5800, 3800, 256),
+        Vector(-2800, 2200, 256), Vector(2800, -2200, 256),
+        Vector(0, 0, 256),
+        Vector(-4800, 0, 256), Vector(4800, 0, 256),
+        Vector(0, -4800, 256), Vector(0, 4800, 256),
+    }
+    local myPos = bot:GetLocation()
+    local bestSpot, bestDist = nil, 1e9
+    for i = 1, #spots do
+        local sp = spots[i]
+        local d = Distance(myPos, sp)
+        if d < bestDist then
+            local vis = true
+            local ok, v = pcall(IsLocationVisible, sp)
+            if ok then vis = v end
+            if not vis then
+                bestDist = d
+                bestSpot = sp
+            end
+        end
+    end
+    if bestSpot == nil then return BT.FAILURE end
+    -- проверяем есть ли вард
+    local wardItem = nil
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil then
+            local n = it:GetName()
+            if n == "item_ward_observer" then wardItem = it; break end
+        end
+    end
+    if wardItem == nil then return BT.FAILURE end
+    if Distance(myPos, bestSpot) <= 500 then
+        bot:Action_UseAbilityOnLocation(wardItem, bestSpot)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(bestSpot)
+        return BT.RUNNING
+    end
+end
+
 function Think()
     if not InitializeBot() then return end
     SyncBlackboard()
