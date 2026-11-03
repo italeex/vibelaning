@@ -5104,6 +5104,355 @@ function Logic.RuneControl(bb)
     return BT.RUNNING
 end
 
+-- =========================================================================
+-- ЛОГИКА: COMBAT STATE MACHINE
+-- =========================================================================
+function Logic.CombatStateMachine(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return "IDLE" end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local killProb = bb:Get("TacticalState", "KillProbability") or 0
+    local state = "IDLE"
+    if hp < 0.25 then state = "RETREAT"
+    elseif #enemies > 0 and killProb > 0.7 then state = "KILL"
+    elseif #enemies > 0 then state = "HARASS"
+    else state = "FARM" end
+    bb:Set("SelfState", "CombatState", state)
+    return state
+end
+
+-- =========================================================================
+-- ЛОГИКА: TARGET SWITCHING
+-- =========================================================================
+function Logic.TargetSwitching(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local current = bb:Get("TacticalState", "TargetEnemyHero")
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    -- если текущая цель умерла или стала невидимой — переключаемся
+    if current == nil or not current:IsAlive() then
+        local best = nil
+        local bestScore = -1e9
+        for i = 1, #enemies do
+            local e = enemies[i]
+            if e ~= nil and e:IsAlive() then
+                local sc = Logic.ScoreTarget(bb, e)
+                if sc > bestScore then bestScore = sc; best = e end
+            end
+        end
+        bb:Set("TacticalState", "TargetEnemyHero", best)
+        return BT.SUCCESS
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: ABILITY COMBO OPTIMIZATION
+-- =========================================================================
+function Logic.AbilityComboOptimization(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local target = bb:Get("TacticalState", "TargetEnemyHero")
+    if target == nil or not target:IsAlive() then return BT.FAILURE end
+    local dist = Distance(bot:GetLocation(), target:GetLocation())
+    local shrapnel = FindAbility(bot, ABILITY_SHRAPNEL)
+    local assassinate = FindAbility(bot, ABILITY_ASSASSINATE)
+
+    -- оптимальный комбо: Shrapnel (замедление) -> Assassinate (урон)
+    -- если оба готовы и цель в радиусе shrapnel
+    if shrapnel ~= nil and shrapnel:GetLevel() > 0 and shrapnel:GetCooldownTimeRemaining() <= 0
+       and bot:GetMana() >= shrapnel:GetManaCost() and dist <= shrapnel:GetCastRange() then
+        bot:Action_UseAbilityOnLocation(shrapnel, target:GetLocation())
+        return BT.RUNNING
+    end
+    if assassinate ~= nil and assassinate:GetLevel() > 0 and assassinate:GetCooldownTimeRemaining() <= 0
+       and bot:GetMana() >= assassinate:GetManaCost() and dist <= assassinate:GetCastRange()
+       and target:IsVisible() then
+        bot:Action_UseAbilityOnEntity(assassinate, target)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: RESOURCE MANAGEMENT
+-- =========================================================================
+function Logic.ResourceManagement(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local gold = bb:Get("SelfState", "Gold") or 0
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    -- резерв золота для buyback
+    local buybackCost = 0
+    local ok, bc = pcall(function() return bot:GetBuybackCost() end)
+    if ok and type(bc) == "number" then buybackCost = bc end
+    local reserve = buybackCost + 500  -- резерв + 500 на расходники
+    bb:Set("SelfState", "GoldReserve", reserve)
+    bb:Set("SelfState", "SpendableGold", math.max(0, gold - reserve))
+end
+
+-- =========================================================================
+-- ЛОГИКА: ITEM PRIORITY
+-- =========================================================================
+function Logic.ItemPriority(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local gold = bb:Get("SelfState", "SpendableGold") or 0
+    local enemies = {}
+    local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ENEMY_HEROES) end)
+    if ok and units ~= nil then
+        for i = 1, #units do
+            local u = units[i]
+            if u ~= nil and u:IsAlive() then table.insert(enemies, u:GetName()) end
+        end
+    end
+    -- приоритет предметов по ситуации
+    local priority = ITEM_BUILD
+    -- если много магов — BKB раньше
+    local magicCount = 0
+    for i = 1, #enemies do
+        local n = enemies[i] or ""
+        if string.find(n, "lion") or string.find(n, "lina") or string.find(n, "zeus") then magicCount = magicCount + 1 end
+    end
+    if magicCount >= 2 then
+        -- двигаем BKB в начало
+        local newBuild = {}
+        for i, v in ipairs(ITEM_BUILD) do
+            if v ~= "item_black_king_bar" then table.insert(newBuild, v) end
+        end
+        table.insert(newBuild, 4, "item_black_king_bar")
+        priority = newBuild
+    end
+    bb:Set("MacroState", "ItemPriority", priority)
+end
+
+-- =========================================================================
+-- ЛОГИКА: FARM ROUTE OPTIMIZATION
+-- =========================================================================
+function Logic.FarmRouteOptimization(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local neutrals = bb:Get("TacticalState", "NearbyNeutralCreeps") or {}
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    if #neutrals == 0 and #enemyCreeps == 0 then return BT.FAILURE end
+    -- выбираем ближайший кемп/вейв
+    local myPos = bot:GetLocation()
+    local bestTarget, bestDist = nil, 1e9
+    for i = 1, #neutrals do
+        local c = neutrals[i]
+        if c ~= nil and c:IsAlive() then
+            local d = Distance(myPos, c:GetLocation())
+            if d < bestDist then bestDist = d; bestTarget = c end
+        end
+    end
+    for i = 1, #enemyCreeps do
+        local c = enemyCreeps[i]
+        if c ~= nil and c:IsAlive() then
+            local d = Distance(myPos, c:GetLocation())
+            if d < bestDist then bestDist = d; bestTarget = c end
+        end
+    end
+    if bestTarget ~= nil then
+        bot:Action_MoveToLocation(bestTarget:GetLocation())
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: STACK AND PULL
+-- =========================================================================
+function Logic.StackAndPull(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    local sec = time % 60
+    -- стекаем за 53-55 секунд
+    if sec < 53 or sec > 55 then return BT.FAILURE end
+    local neutrals = bb:Get("TacticalState", "NearbyNeutralCreeps") or {}
+    if #neutrals == 0 then return BT.FAILURE end
+    local camp = neutrals[1]
+    local cLoc = camp:GetLocation()
+    local away = cLoc + (bot:GetLocation() - cLoc):Normalized() * 500
+    bot:Action_MoveToLocation(away)
+    return BT.RUNNING
+end
+
+-- =========================================================================
+-- ЛОГИКА: LANE EQUILIBRIUM CONTROL
+-- =========================================================================
+function Logic.LaneEquilibriumControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local allyCreeps = bb:Get("TacticalState", "NearbyAllyCreeps") or {}
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end
+    -- если союзных крипов больше — атакуем вражеских
+    if #allyCreeps > #enemyCreeps + 1 then
+        local t = FindLowestHPUnit(enemyCreeps)
+        if t ~= nil then
+            bot:Action_AttackUnit(t, true)
+            return BT.RUNNING
+        end
+    end
+    -- если вражеских больше — фризим
+    if #enemyCreeps > #allyCreeps + 2 then
+        return BT.SUCCESS
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: DENY CONTROL
+-- =========================================================================
+function Logic.DenyControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local allyCreeps = bb:Get("TacticalState", "NearbyAllyCreeps") or {}
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    local atkDmg = bb:Get("SelfState", "AttackDamage") or 0
+    for i = 1, #allyCreeps do
+        local c = allyCreeps[i]
+        if c ~= nil and c:IsAlive() then
+            local d = Distance(bot:GetLocation(), c:GetLocation())
+            if d <= attackRange + 60 and c:GetHealth() <= atkDmg + 5
+               and c:GetHealth() / c:GetMaxHealth() < 0.5 then
+                bot:Action_AttackUnit(c, true)
+                return BT.RUNNING
+            end
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: HARASS CONTROL
+-- =========================================================================
+function Logic.HarassControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies == 0 then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.5 then return BT.FAILURE end
+    local target = enemies[1]
+    if target == nil or not target:IsAlive() then return BT.FAILURE end
+    local dist = Distance(bot:GetLocation(), target:GetLocation())
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    -- харасим если в радиусе атаки
+    if dist <= attackRange + 80 then
+        bot:Action_AttackUnit(target, true)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: LAST HIT CONTROL
+-- =========================================================================
+function Logic.LastHitControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    local atkDmg = bb:Get("SelfState", "AttackDamage") or 0
+    for i = 1, #enemyCreeps do
+        local c = enemyCreeps[i]
+        if c ~= nil and c:IsAlive() then
+            local d = Distance(bot:GetLocation(), c:GetLocation())
+            if d <= attackRange + 60 and c:GetHealth() <= atkDmg + 8 then
+                bot:Action_AttackUnit(c, true)
+                return BT.RUNNING
+            end
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: COMBAT CONTROL
+-- =========================================================================
+function Logic.CombatControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local target = bb:Get("TacticalState", "TargetEnemyHero")
+    if target == nil or not target:IsAlive() then return BT.FAILURE end
+    local dist = Distance(bot:GetLocation(), target:GetLocation())
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    if dist <= attackRange then
+        bot:Action_AttackUnit(target, true)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(target:GetLocation())
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: FARM CONTROL
+-- =========================================================================
+function Logic.FarmControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local neutrals = bb:Get("TacticalState", "NearbyNeutralCreeps") or {}
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    -- атакуем ближайшего крипа
+    local target = nil
+    local bestDist = 1e9
+    for i = 1, #enemyCreeps do
+        local c = enemyCreeps[i]
+        if c ~= nil and c:IsAlive() then
+            local d = Distance(bot:GetLocation(), c:GetLocation())
+            if d < bestDist then bestDist = d; target = c end
+        end
+    end
+    for i = 1, #neutrals do
+        local c = neutrals[i]
+        if c ~= nil and c:IsAlive() then
+            local d = Distance(bot:GetLocation(), c:GetLocation())
+            if d < bestDist then bestDist = d; target = c end
+        end
+    end
+    if target ~= nil then
+        if bestDist <= attackRange + 60 then
+            bot:Action_AttackUnit(target, true)
+            return BT.RUNNING
+        else
+            bot:Action_MoveToLocation(target:GetLocation())
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: LANE CONTROL
+-- =========================================================================
+function Logic.LaneControl2(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local allyCreeps = bb:Get("TacticalState", "NearbyAllyCreeps") or {}
+    if #allyCreeps > 0 then
+        local sumX, sumY, n = 0, 0, 0
+        for i = 1, #allyCreeps do
+            local c = allyCreeps[i]
+            if c ~= nil and c:IsAlive() then
+                local l = c:GetLocation()
+                sumX = sumX + l.x; sumY = sumY + l.y; n = n + 1
+            end
+        end
+        if n > 0 then
+            local center = Vector(sumX / n, sumY / n, 0)
+            bot:Action_MoveToLocation(center)
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
 function Think()
     if not InitializeBot() then return end
     SyncBlackboard()
