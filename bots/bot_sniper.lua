@@ -610,6 +610,272 @@ function Logic.Lane(bb)
 end
 
 -- =========================================================================
+-- ЛОГИКА: WARDS (наблюдение/сторожевые)
+-- =========================================================================
+local WARD_SPOTS = {
+    -- ключевые точки карты (приблизительно)
+    Vector(-4200, -3800, 0), Vector(4200, 3800, 0),
+    Vector(-1800, 1200, 0), Vector(1800, -1200, 0),
+    Vector(0, 0, 0),
+}
+
+function Logic.PlaceWard(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- Ищем вард в инвентаре
+    local wardItem = nil
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil then
+            local n = it:GetName()
+            if n == "item_ward_observer" or n == "item_ward_sentry" then
+                wardItem = it
+                break
+            end
+        end
+    end
+    if wardItem == nil then return BT.FAILURE end
+
+    -- Выбираем точку варда: ближайшая из WARD_SPOTS, где нет видимости
+    local myPos = bot:GetLocation()
+    local bestSpot, bestDist = nil, 1e9
+    for i = 1, #WARD_SPOTS do
+        local sp = WARD_SPOTS[i]
+        local d = Distance(myPos, sp)
+        if d < bestDist and d <= 1600 then
+            -- проверяем видимость
+            local vis = true
+            local ok, v = pcall(IsLocationVisible, sp)
+            if ok then vis = v end
+            if not vis then
+                bestDist = d
+                bestSpot = sp
+            end
+        end
+    end
+    if bestSpot == nil then return BT.FAILURE end
+
+    -- ставим вард если в радиусе каста
+    local d = Distance(myPos, bestSpot)
+    if d <= 500 then
+        bot:Action_UseAbilityOnLocation(wardItem, bestSpot)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(bestSpot)
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: RUNES
+-- =========================================================================
+function Logic.CollectRune(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- Проверяем руны поблизости (bounty/powerup)
+    local runes = {}
+    local ok, r = pcall(function() return GetRuneLocations() end)
+    if ok and r ~= nil then runes = r end
+
+    local myPos = bot:GetLocation()
+    local bestRune, bestDist = nil, 1e9
+    for i = 1, #runes do
+        local rl = runes[i]
+        local loc = nil
+        if type(rl) == "table" then loc = rl.location or rl end
+        if loc ~= nil then
+            local d = Distance(myPos, loc)
+            if d < bestDist and d <= 2000 then
+                bestDist = d
+                bestRune = loc
+            end
+        end
+    end
+    if bestRune == nil then return BT.FAILURE end
+    if bestDist <= 150 then
+        -- просто подойти; руна подбирается автоматически
+        bot:Action_MoveToLocation(bestRune)
+        return BT.RUNNING
+    end
+    bot:Action_MoveToLocation(bestRune)
+    return BT.RUNNING
+end
+
+-- =========================================================================
+-- ЛОГИКА: ROSHAN
+-- =========================================================================
+function Logic.Roshan(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    -- Идём на Рошана только если достаточно союзников и нет врагов рядом
+    if #allies < 2 then return BT.FAILURE end
+    if #enemies > 0 then return BT.FAILURE end
+
+    local ok, rloc = pcall(function() return GetRoshanLocation() end)
+    if not ok or rloc == nil then return BT.FAILURE end
+
+    local myPos = bot:GetLocation()
+    local d = Distance(myPos, rloc)
+    if d <= 300 then
+        -- атакуем Рошана
+        -- находим Roshan unit
+        local rosh = nil
+        local ok2, units = pcall(function() return GetUnitList(UNIT_LIST_ALL) end)
+        if ok2 and units ~= nil then
+            for i = 1, #units do
+                local u = units[i]
+                if u ~= nil and u:GetName() == "npc_dota_roshan" and u:IsAlive() then
+                    rosh = u
+                    break
+                end
+            end
+        end
+        if rosh ~= nil then
+            bot:Action_AttackUnit(rosh, true)
+            return BT.RUNNING
+        end
+    else
+        bot:Action_MoveToLocation(rloc)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: OBJECTIVE / PUSH
+-- =========================================================================
+function Logic.PushObjective(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.5 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end
+
+    -- Ищем ближайшую вражескую башню
+    local towers = bb:Get("TacticalState", "NearbyEnemyTowers") or {}
+    if #towers == 0 then
+        -- поиск по всей карте
+        local ok, all = pcall(function() return GetUnitList(UNIT_LIST_ENEMY) end)
+        if ok and all ~= nil then
+            for i = 1, #all do
+                local u = all[i]
+                if u ~= nil and u:IsAlive() and u:IsTower() then
+                    table.insert(towers, u)
+                end
+            end
+        end
+    end
+    if #towers == 0 then return BT.FAILURE end
+    local t = FindLowestHPUnit(towers)
+    if t == nil then return BT.FAILURE end
+
+    local myPos = bot:GetLocation()
+    local d = Distance(myPos, t:GetLocation())
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    if d <= attackRange + 80 then
+        bot:Action_AttackUnit(t, true)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(t:GetLocation())
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: DEFEND BASE
+-- =========================================================================
+function Logic.DefendBase(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- Если вражеские крипы у нашей базы/фонтана
+    local allyTowers = bb:Get("TacticalState", "NearbyAllyTowers") or {}
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local fountain = GetFountainLoc(bot)
+    if fountain == nil then return BT.FAILURE end
+
+    -- Если крипы близко к фонтану
+    local danger = false
+    for i = 1, #enemyCreeps do
+        local c = enemyCreeps[i]
+        if c ~= nil and c:IsAlive() then
+            if Distance(c:GetLocation(), fountain) < 2500 then
+                danger = true
+                break
+            end
+        end
+    end
+    if not danger then return BT.FAILURE end
+
+    -- Атакуем ближайшего вражеского крипа
+    local target = FindLowestHPUnit(enemyCreeps)
+    if target ~= nil then
+        bot:Action_AttackUnit(target, true)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: TEAM FIGHT POSITIONING
+-- =========================================================================
+function Logic.TeamFight(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    if #enemies < 2 or #allies < 2 then return BT.FAILURE end
+
+    -- Sniper держится на максимальной дистанции атаки от ближайшего врага
+    local nearestEnemy = nil
+    local nearDist = 1e9
+    for i = 1, #enemies do
+        local e = enemies[i]
+        if e ~= nil and e:IsAlive() then
+            local d = Distance(bot:GetLocation(), e:GetLocation())
+            if d < nearDist then nearDist = d; nearestEnemy = e end
+        end
+    end
+    if nearestEnemy == nil then return BT.FAILURE end
+
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    local myPos = bot:GetLocation()
+    local ePos = nearestEnemy:GetLocation()
+
+    -- Если враг близко — отступаем
+    if nearDist < attackRange * 0.6 then
+        local away = myPos + (myPos - ePos):Normalized() * 400
+        bot:Action_MoveToLocation(away)
+        return BT.RUNNING
+    end
+
+    -- Если цель вне радиуса атаки — двигаемся к ней, но держим дистанцию
+    local killTarget = bb:Get("TacticalState", "KillTarget")
+    local target = killTarget or bb:Get("TacticalState", "TargetEnemyHero")
+    if target ~= nil and target:IsAlive() then
+        local d = Distance(myPos, target:GetLocation())
+        if d > attackRange then
+            bot:Action_MoveToLocation(target:GetLocation())
+            return BT.RUNNING
+        else
+            -- Shrapnel + атака
+            local shrapnel = FindAbility(bot, ABILITY_SHRAPNEL)
+            if shrapnel ~= nil and shrapnel:GetLevel() > 0
+               and shrapnel:GetCooldownTimeRemaining() <= 0
+               and bot:GetMana() >= shrapnel:GetManaCost() then
+                bot:Action_UseAbilityOnLocation(shrapnel, target:GetLocation())
+                return BT.RUNNING
+            end
+            bot:Action_AttackUnit(target, true)
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
 -- BUILD BEHAVIOR TREE
 -- =========================================================================
 function BuildBehaviorTree()
@@ -651,6 +917,23 @@ function BuildBehaviorTree()
         end
     })
 
+    local condShouldPush = BT.Condition:new({
+        name = "CheckShouldPush",
+        eval = function(npcBot, blackboard)
+            return blackboard:Get("MacroState", "ShouldPush") == true
+        end
+    })
+
+    local condShouldDefend = BT.Condition:new({
+        name = "CheckShouldDefend",
+        eval = function(npcBot, blackboard)
+            local ec = blackboard:Get("TacticalState", "NearbyEnemyCreeps") or {}
+            local fountain = nil
+            -- defend if enemy creeps near base (checked in Logic.DefendBase)
+            return #ec > 0
+        end
+    })
+
     -- Actions
     local actRetreat = BT.Action:new({
         name = "ExecuteRetreat",
@@ -681,15 +964,67 @@ function BuildBehaviorTree()
         end
     })
 
+    -- Actions (new)
+    local actWard = BT.Action:new({
+        name = "ExecutePlaceWard",
+        execute = function(npcBot, blackboard) return Logic.PlaceWard(blackboard) end
+    })
+    local actRune = BT.Action:new({
+        name = "ExecuteCollectRune",
+        execute = function(npcBot, blackboard) return Logic.CollectRune(blackboard) end
+    })
+    local actRoshan = BT.Action:new({
+        name = "ExecuteRoshan",
+        execute = function(npcBot, blackboard) return Logic.Roshan(blackboard) end
+    })
+    local actPush = BT.Action:new({
+        name = "ExecutePushObjective",
+        execute = function(npcBot, blackboard) return Logic.PushObjective(blackboard) end
+    })
+    local actDefend = BT.Action:new({
+        name = "ExecuteDefendBase",
+        execute = function(npcBot, blackboard) return Logic.DefendBase(blackboard) end
+    })
+    local actTeamFight = BT.Action:new({
+        name = "ExecuteTeamFight",
+        execute = function(npcBot, blackboard) return Logic.TeamFight(blackboard) end
+    })
+
+    -- Conditions
+    local condHasWard = BT.Condition:new({
+        name = "CheckHasWard",
+        eval = function(npcBot, blackboard)
+            local bot = blackboard:GetBotRef()
+            if bot == nil then return false end
+            for i = 0, 15 do
+                local it = bot:GetItemInSlot(i)
+                if it ~= nil then
+                    local n = it:GetName()
+                    if n == "item_ward_observer" or n == "item_ward_sentry" then return true end
+                end
+            end
+            return false
+        end
+    })
+
     -- Sequences
     local seqRetreat = BT.BuildSequence("EmergencyRetreat", { condLowHP, actRetreat })
     local seqKill    = BT.BuildSequence("KillHero", { condKillTarget, actCombat })
+    local seqTeamFight = BT.BuildSequence("TeamFight", { condTeamFight, actTeamFight })
+    local seqRoshan  = BT.BuildSequence("Roshan", { actRoshan })
+    local seqPush    = BT.BuildSequence("PushObjective", { condShouldPush, actPush })
+    local seqDefend  = BT.BuildSequence("DefendBase", { actDefend })
     local seqCombat  = BT.BuildSequence("MicroCombat", { condEnemyHero, actCombat })
+    local seqWard    = BT.BuildSequence("PlaceWard", { condHasWard, actWard })
+    local seqRune    = BT.BuildSequence("CollectRune", { actRune })
     local seqCreep   = BT.BuildSequence("CreepMicro", { condCreeps, actFarm })
     local seqLane    = BT.BuildSequence("IdleLaningMacro", { actLane })
 
-    -- Root Selector: приоритет retreat > kill > combat > farm > lane
-    local root = BT.BuildSelector("RootSelector", { seqRetreat, seqKill, seqCombat, seqCreep, seqLane })
+    -- Root Selector: приоритет retreat > kill > teamfight > defend > push > combat > ward > rune > farm > lane
+    local root = BT.BuildSelector("RootSelector", {
+        seqRetreat, seqKill, seqTeamFight, seqDefend, seqPush, seqCombat,
+        seqWard, seqRune, seqCreep, seqLane, seqRoshan
+    })
     return root
 end
 
