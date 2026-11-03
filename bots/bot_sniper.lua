@@ -2349,6 +2349,331 @@ function Logic.DynamicItemBuild(bb)
     bb:Set("MacroState", "MagicHeavy", magicCount >= 2)
 end
 
+-- =========================================================================
+-- ЛОГИКА: ROshan TIMING & AEGIS
+-- =========================================================================
+function Logic.RoshanTiming(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    -- Рошан обычно спавнится ~8-11 мин, респавн 8-11 мин
+    if time < 480 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    -- идём только если союзников >= 3 и врагов нет рядом
+    if #allies < 2 then return BT.FAILURE end
+    if #enemies > 0 then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.6 then return BT.FAILURE end
+
+    local ok, rloc = pcall(function() return GetRoshanLocation() end)
+    if not ok or rloc == nil then return BT.FAILURE end
+    local d = Distance(bot:GetLocation(), rloc)
+    if d > 3000 then return BT.FAILURE end
+    if d <= 400 then
+        -- атакуем Рошана
+        local rosh = nil
+        local ok2, units = pcall(function() return GetUnitList(UNIT_LIST_ALL) end)
+        if ok2 and units ~= nil then
+            for i = 1, #units do
+                local u = units[i]
+                if u ~= nil and u:IsAlive() and u:GetName() == "npc_dota_roshan" then
+                    rosh = u; break
+                end
+            end
+        end
+        if rosh ~= nil then
+            bot:Action_AttackUnit(rosh, true)
+            return BT.RUNNING
+        end
+    else
+        bot:Action_MoveToLocation(rloc)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: OUTPOST CONTROL
+-- =========================================================================
+function Logic.OutpostControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.5 then return BT.FAILURE end
+
+    -- ищем нейтральный/вражеский аванпост
+    local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ALL) end)
+    if not ok or units == nil then return BT.FAILURE end
+    local outpost = nil
+    for i = 1, #units do
+        local u = units[i]
+        if u ~= nil and u:IsAlive() and string.find(u:GetName() or "", "outpost") then
+            outpost = u; break
+        end
+    end
+    if outpost == nil then return BT.FAILURE end
+    local d = Distance(bot:GetLocation(), outpost:GetLocation())
+    if d <= 200 then
+        bot:Action_AttackUnit(outpost, true)
+        return BT.RUNNING
+    elseif d <= 2000 then
+        bot:Action_MoveToLocation(outpost:GetLocation())
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: TORMENTOR (торментор)
+-- =========================================================================
+function Logic.Tormentor(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    if time < 1200 then return BT.FAILURE end  -- торментор с 20 мин
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    if #allies < 2 then return BT.FAILURE end
+    if #enemies > 0 then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.5 then return BT.FAILURE end
+
+    local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ALL) end)
+    if not ok or units == nil then return BT.FAILURE end
+    local tor = nil
+    for i = 1, #units do
+        local u = units[i]
+        if u ~= nil and u:IsAlive() and string.find(u:GetName() or "", "tormentor") then
+            tor = u; break
+        end
+    end
+    if tor == nil then return BT.FAILURE end
+    local d = Distance(bot:GetLocation(), tor:GetLocation())
+    if d <= 400 then
+        bot:Action_AttackUnit(tor, true)
+        return BT.RUNNING
+    elseif d <= 3000 then
+        bot:Action_MoveToLocation(tor:GetLocation())
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: LOTUS POOL (лотос)
+-- =========================================================================
+function Logic.LotusPool(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local mp = bb:Get("SelfState", "MP") or 1.0
+    if hp > 0.8 and mp > 0.8 then return BT.FAILURE end
+
+    local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ALL) end)
+    if not ok or units == nil then return BT.FAILURE end
+    local lotus = nil
+    for i = 1, #units do
+        local u = units[i]
+        if u ~= nil and u:IsAlive() and string.find(u:GetName() or "", "lotus") then
+            lotus = u; break
+        end
+    end
+    if lotus == nil then return BT.FAILURE end
+    local d = Distance(bot:GetLocation(), lotus:GetLocation())
+    if d <= 200 then
+        bot:Action_MoveToLocation(lotus:GetLocation())
+        return BT.RUNNING
+    elseif d <= 2000 then
+        bot:Action_MoveToLocation(lotus:GetLocation())
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: SENTRY WARD DEWARDING
+-- =========================================================================
+function Logic.Dewarding(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- ищем sentry в инвентаре
+    local sentry = nil
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil and it:GetName() == "item_ward_sentry" then
+            sentry = it; break
+        end
+    end
+    if sentry == nil then return BT.FAILURE end
+    if sentry:GetCooldownTimeRemaining() > 0 then return BT.FAILURE end
+
+    -- ищем невидимые варды врага (приблизительно по локациям)
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end  -- не дewardим если враги рядом
+
+    -- ставим sentry в ключевой точке
+    local spots = {
+        Vector(-2000, 0, 0), Vector(2000, 0, 0),
+        Vector(0, 2000, 0), Vector(0, -2000, 0),
+    }
+    local myPos = bot:GetLocation()
+    local bestSpot, bestDist = nil, 1e9
+    for i = 1, #spots do
+        local sp = spots[i]
+        local d = Distance(myPos, sp)
+        if d < bestDist and d <= 1600 then
+            bestDist = d
+            bestSpot = sp
+        end
+    end
+    if bestSpot == nil then return BT.FAILURE end
+    if Distance(myPos, bestSpot) <= 500 then
+        bot:Action_UseAbilityOnLocation(sentry, bestSpot)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(bestSpot)
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: DUST USAGE
+-- =========================================================================
+function Logic.UseDust(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local dust, _ = HasItem(bot, "item_dust")
+    if dust == nil or dust:GetCooldownTimeRemaining() > 0 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    -- используем если есть невидимые враги рядом
+    local invisibleNearby = false
+    for i = 1, #enemies do
+        local e = enemies[i]
+        if e ~= nil and e:IsAlive() and not e:IsVisible() then
+            invisibleNearby = true
+            break
+        end
+    end
+    if invisibleNearby then
+        pcall(function() bot:Action_UseAbility(dust) end)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: GEM CARRY (если есть гем — не умирать)
+-- =========================================================================
+function Logic.GemSafety(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local gem, _ = HasItem(bot, "item_gem")
+    if gem == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if hp < 0.4 and #enemies > 0 then
+        -- отступаем с гемом
+        local fountain = GetFountainLoc(bot)
+        if fountain ~= nil then
+            bot:Action_MoveToLocation(fountain)
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: BOUNTY RUNE CONTROL
+-- =========================================================================
+function Logic.BountyRune(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    -- баунти руны каждые 3 мин начиная с 0
+    local nextRune = math.floor(time / 180) * 180 + 180
+    if math.abs(time - nextRune) > 15 then return BT.FAILURE end
+    -- идём к ближайшей баунти руне
+    local runes = {}
+    local ok, r = pcall(function() return GetRuneLocations() end)
+    if ok and r ~= nil then runes = r end
+    if #runes == 0 then return BT.FAILURE end
+    local myPos = bot:GetLocation()
+    local best, bestDist = nil, 1e9
+    for i = 1, #runes do
+        local rl = runes[i]
+        local loc = (type(rl) == "table") and (rl.location or rl) or rl
+        if loc ~= nil then
+            local d = Distance(myPos, loc)
+            if d < bestDist then bestDist = d; best = loc end
+        end
+    end
+    if best == nil then return BT.FAILURE end
+    bot:Action_MoveToLocation(best)
+    return BT.RUNNING
+end
+
+-- =========================================================================
+-- ЛОГИКА: POWER RUNE CONTROL
+-- =========================================================================
+function Logic.PowerRune(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    -- power runes каждые 2 мин начиная с 6:00
+    if time < 360 then return BT.FAILURE end
+    local rem = (time - 360) % 120
+    if rem > 15 then return BT.FAILURE end
+    local runes = {}
+    local ok, r = pcall(function() return GetRuneLocations() end)
+    if ok and r ~= nil then runes = r end
+    if #runes == 0 then return BT.FAILURE end
+    local myPos = bot:GetLocation()
+    local best, bestDist = nil, 1e9
+    for i = 1, #runes do
+        local rl = runes[i]
+        local loc = (type(rl) == "table") and (rl.location or rl) or rl
+        if loc ~= nil then
+            local d = Distance(myPos, loc)
+            if d < bestDist then bestDist = d; best = loc end
+        end
+    end
+    if best == nil then return BT.FAILURE end
+    bot:Action_MoveToLocation(best)
+    return BT.RUNNING
+end
+
+-- =========================================================================
+-- ЛОГИКА: WISDOM RUNE (мудрость)
+-- =========================================================================
+function Logic.WisdomRune(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    if time < 420 then return BT.FAILURE end
+    local rem = (time - 420) % 420
+    if rem > 15 then return BT.FAILURE end
+    local runes = {}
+    local ok, r = pcall(function() return GetRuneLocations() end)
+    if ok and r ~= nil then runes = r end
+    if #runes == 0 then return BT.FAILURE end
+    local myPos = bot:GetLocation()
+    local best, bestDist = nil, 1e9
+    for i = 1, #runes do
+        local rl = runes[i]
+        local loc = (type(rl) == "table") and (rl.location or rl) or rl
+        if loc ~= nil then
+            local d = Distance(myPos, loc)
+            if d < bestDist then bestDist = d; best = loc end
+        end
+    end
+    if best == nil then return BT.FAILURE end
+    bot:Action_MoveToLocation(best)
+    return BT.RUNNING
+end
+
 function Think()
     if not InitializeBot() then return end
     SyncBlackboard()
@@ -2367,6 +2692,10 @@ function Think()
     Logic.MapAwareness(Blackboard)
     Logic.AntiGank(Blackboard)
     Logic.CourierManagement(Blackboard)
+    Logic.RoshanTiming(Blackboard)
+    Logic.BountyRune(Blackboard)
+    Logic.PowerRune(Blackboard)
+    Logic.WisdomRune(Blackboard)
     if rootTree ~= nil then
         rootTree:Tick(thisBot, Blackboard)
     end
