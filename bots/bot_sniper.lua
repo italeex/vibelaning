@@ -1070,6 +1070,163 @@ function Logic.BuyConsumables(bb)
 end
 
 -- =========================================================================
+-- ЛОГИКА: ORB-WALKING (анимация-кансел)
+-- =========================================================================
+function Logic.OrbWalk(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local target = bb:Get("TacticalState", "TargetEnemyHero")
+    if target == nil or not target:IsAlive() then return BT.FAILURE end
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    local myPos = bot:GetLocation()
+    local tPos = target:GetLocation()
+    local dist = Distance(myPos, tPos)
+
+    if dist <= attackRange + 40 then
+        -- атакуем
+        bot:Action_AttackUnit(target, true)
+        return BT.RUNNING
+    else
+        -- двигаемся к цели
+        bot:Action_MoveToLocation(tPos)
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: LAST HIT С УЧЁТОМ ВРЕМЕНИ ПОЛЁТА СНАРЯДА
+-- =========================================================================
+function Logic.PredictedLastHit(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    local atkDmg = bb:Get("SelfState", "AttackDamage") or 0
+    local projSpeed = 3000
+    local ok, ps = pcall(function() return bot:GetProjectileSpeed() end)
+    if ok and type(ps) == "number" and ps > 0 then projSpeed = ps end
+
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local bestTarget, bestTime = nil, 1e9
+    for i = 1, #enemyCreeps do
+        local c = enemyCreeps[i]
+        if c ~= nil and c:IsAlive() then
+            local d = Distance(bot:GetLocation(), c:GetLocation())
+            if d <= attackRange + 60 then
+                local travelTime = d / projSpeed
+                local creepHP = c:GetHealth()
+                -- урон крипа по себе (реген) за время полёта пренебрегаем
+                if creepHP <= atkDmg and travelTime < bestTime then
+                    bestTime = travelTime
+                    bestTarget = c
+                end
+            end
+        end
+    end
+    if bestTarget ~= nil then
+        bot:Action_AttackUnit(bestTarget, true)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: TOWER DIVING SAFETY
+-- =========================================================================
+function Logic.TowerDiveCheck(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return false end
+    local enemyTowers = bb:Get("TacticalState", "NearbyEnemyTowers") or {}
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    for i = 1, #enemyTowers do
+        local t = enemyTowers[i]
+        if t ~= nil and t:IsAlive() then
+            local d = Distance(bot:GetLocation(), t:GetLocation())
+            if d <= 900 and hp < 0.7 then
+                return false -- не дайвим
+            end
+        end
+    end
+    return true
+end
+
+-- =========================================================================
+-- ЛОГИКА: LANE SELECTION (выбор линии при старте)
+-- =========================================================================
+function Logic.SelectLane(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local lane = bb:Get("MacroState", "ActiveLane")
+    if lane ~= nil then return end
+    -- Sniper обычно идёт на сейф-лейн (бот/топ в зависимости от стороны)
+    local team = bot:GetTeam()
+    -- Radiant: сейф лейн = бот; Dire: сейф лейн = топ
+    local safeLane = (team == TEAM_RADIANT) and LANE_BOT or LANE_TOP
+    bb:Set("MacroState", "ActiveLane", safeLane)
+    bb:Set("MacroState", "FarmLane", safeLane)
+end
+
+-- =========================================================================
+-- ЛОГИКА: BUYBACK DECISION
+-- =========================================================================
+function Logic.BuybackDecision(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local hasBB = bb:Get("SelfState", "BuybackAvailable")
+    if not hasBB then return end
+    -- Логика buyback принимается движком при смерти; здесь только флаг
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    -- если враги пушат базу и есть buyback — помечаем
+    local fountain = GetFountainLoc(bot)
+    if fountain ~= nil then
+        local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+        local nearBase = false
+        for i = 1, #enemyCreeps do
+            local c = enemyCreeps[i]
+            if c ~= nil and c:IsAlive() and Distance(c:GetLocation(), fountain) < 3000 then
+                nearBase = true
+                break
+            end
+        end
+        if nearBase then
+            bb:Set("MacroState", "BuybackStatus", true)
+        end
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: ECONOMY UPGRADE PATH
+-- =========================================================================
+local UPGRADE_PATH = {
+    ["item_wraith_band"] = "item_null_talisman",
+}
+
+function Logic.UpgradeItems(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local gold = bb:Get("SelfState", "Gold") or 0
+    for i = 0, 5 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil then
+            local name = it:GetName()
+            -- Dragon Lance -> Hurricane Pike (recipe)
+            if name == "item_dragon_lance" then
+                local hasPike = (HasItem(bot, "item_hurricane_pike") ~= nil)
+                if not hasPike then
+                    local recipeCost = ItemCost("item_hurricane_pike") - ItemCost("item_dragon_lance") - ItemCost("item_force_staff")
+                    if gold >= recipeCost and recipeCost > 0 then
+                        -- покупаем force_staff если нет
+                        local fs, _ = HasItem(bot, "item_force_staff")
+                        if fs == nil and gold >= ItemCost("item_force_staff") then
+                            pcall(function() bot:Action_PurchaseItem("item_force_staff") end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- =========================================================================
 -- ЛОГИКА: CREEP AGGRO / LANE EQUILIBRIUM
 -- =========================================================================
 function Logic.ManageCreepAggro(bb)
@@ -1502,11 +1659,14 @@ end
 function Think()
     if not InitializeBot() then return end
     SyncBlackboard()
+    Logic.SelectLane(Blackboard)
     Logic.UpdateMacro(Blackboard)
     Logic.BuyItems(Blackboard)
     Logic.BuyConsumables(Blackboard)
+    Logic.UpgradeItems(Blackboard)
     Logic.LevelAbilities(Blackboard)
     Logic.FindKillTarget(Blackboard)
+    Logic.BuybackDecision(Blackboard)
     Logic.ReactiveItems(Blackboard)
     Logic.MapAwareness(Blackboard)
     if rootTree ~= nil then
