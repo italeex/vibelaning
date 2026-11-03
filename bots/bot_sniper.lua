@@ -876,6 +876,396 @@ function Logic.TeamFight(bb)
 end
 
 -- =========================================================================
+-- ЛОГИКА: SKILL BUILD
+-- =========================================================================
+local SKILL_BUILD = {
+    "sniper_shrapnel",
+    "sniper_take_aim",
+    "sniper_shrapnel",
+    "sniper_headshot",
+    "sniper_shrapnel",
+    "sniper_assassinate",
+    "sniper_shrapnel",
+    "sniper_take_aim",
+    "sniper_take_aim",
+    "sniper_headshot",
+    "sniper_assassinate",
+    "sniper_take_aim",
+    "sniper_headshot",
+    "sniper_headshot",
+    "sniper_take_aim",
+    "sniper_assassinate",
+    "sniper_headshot",
+    "sniper_take_aim",
+    "sniper_headshot",
+    "sniper_take_aim",
+    "sniper_headshot",
+    "sniper_take_aim",
+    "sniper_headshot",
+    "sniper_take_aim",
+}
+
+function Logic.LevelAbilities(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local pts = 0
+    local ok, p = pcall(function() return bot:GetAbilityPoints() end)
+    if ok and type(p) == "number" then pts = p end
+    if pts <= 0 then return end
+    local level = bot:GetLevel()
+    local idx = math.min(level, #SKILL_BUILD)
+    local wanted = SKILL_BUILD[idx]
+    if wanted == nil then return end
+    -- уровень способности если не прокачана
+    local ab = FindAbility(bot, wanted)
+    if ab ~= nil then
+        local curLvl = ab:GetLevel()
+        local targetLvl = 0
+        -- посчитаем сколько раз wanted встречается до idx
+        for i = 1, idx do
+            if SKILL_BUILD[i] == wanted then targetLvl = targetLvl + 1 end
+        end
+        if curLvl < targetLvl then
+            pcall(function() bot:Action_LevelAbility(wanted) end)
+        end
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: ITEM USAGE (BKB, Hurricane Pike, Satanic и т.д.)
+-- =========================================================================
+function Logic.UseItems(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    if bot:IsChanneling() or bot:IsUsingAbility() then return BT.FAILURE end
+
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local myPos = bot:GetLocation()
+
+    -- BKB: активируем при угрозе или стане
+    local bkb, _ = HasItem(bot, "item_black_king_bar")
+    if bkb ~= nil then
+        local ready = bkb:GetCooldownTimeRemaining() <= 0
+        local threat = bb:Get("TacticalState", "ActiveThreatLevel") or 0
+        if ready and (threat >= 2 or #enemies >= 2) and hp < 0.7 then
+            pcall(function() bot:Action_UseAbility(bkb) end)
+            return BT.RUNNING
+        end
+    end
+
+    -- Hurricane Pike: отскок от близкого врага
+    local pike, _ = HasItem(bot, "item_hurricane_pike")
+    if pike ~= nil then
+        local ready = pike:GetCooldownTimeRemaining() <= 0
+        if ready and #enemies > 0 then
+            local nearest = enemies[1]
+            local d = Distance(myPos, nearest:GetLocation())
+            if d < 350 then
+                pcall(function() bot:Action_UseAbilityOnEntity(pike, nearest) end)
+                return BT.RUNNING
+            end
+        end
+    end
+
+    -- Satanic: активируем при низком HP в бою
+    local satanic, _ = HasItem(bot, "item_satanic")
+    if satanic ~= nil then
+        local ready = satanic:GetCooldownTimeRemaining() <= 0
+        if ready and hp < 0.4 and #enemies > 0 then
+            pcall(function() bot:Action_UseAbility(satanic) end)
+            return BT.RUNNING
+        end
+    end
+
+    -- Shadow Blade / Silver Edge: инициация/побег
+    local sb, _ = HasItem(bot, "item_shadow_blade")
+    if sb == nil then sb, _ = HasItem(bot, "item_silver_edge") end
+    if sb ~= nil then
+        local ready = sb:GetCooldownTimeRemaining() <= 0
+        if ready then
+            -- побег при низком HP
+            if hp < 0.25 and #enemies > 0 then
+                pcall(function() bot:Action_UseAbility(sb) end)
+                return BT.RUNNING
+            end
+        end
+    end
+
+    -- Mjollnir active (если есть)
+    local mj, _ = HasItem(bot, "item_mjollnir")
+    if mj ~= nil then
+        local ready = mj:GetCooldownTimeRemaining() <= 0
+        if ready and #enemies >= 2 then
+            pcall(function() bot:Action_UseAbilityOnEntity(mj, bot) end)
+            return BT.RUNNING
+        end
+    end
+
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: CONSUMABLES
+-- =========================================================================
+function Logic.BuyConsumables(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local gold = bb:Get("SelfState", "Gold") or 0
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local mp = bb:Get("SelfState", "MP") or 1.0
+
+    -- Tango если HP низкое и нет танго
+    local hasTango = false
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil and it:GetName() == "item_tango" then hasTango = true end
+    end
+    if not hasTango and gold >= ItemCost("item_tango") and hp < 0.7 then
+        pcall(function() bot:Action_PurchaseItem("item_tango") end)
+    end
+
+    -- Healing Salve
+    local hasSalve = false
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil and it:GetName() == "item_flask" then hasSalve = true end
+    end
+    if not hasSalve and gold >= ItemCost("item_flask") and hp < 0.4 then
+        pcall(function() bot:Action_PurchaseItem("item_flask") end)
+    end
+
+    -- Clarity
+    local hasClarity = false
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil and it:GetName() == "item_clarity" then hasClarity = true end
+    end
+    if not hasClarity and gold >= ItemCost("item_clarity") and mp < 0.4 then
+        pcall(function() bot:Action_PurchaseItem("item_clarity") end)
+    end
+
+    -- Observer ward если нет
+    local hasWard = false
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil and it:GetName() == "item_ward_observer" then hasWard = true end
+    end
+    if not hasWard and gold >= ItemCost("item_ward_observer") then
+        -- покупаем только если есть слот и золота достаточно
+        if FreeSlot(bot) >= 0 then
+            pcall(function() bot:Action_PurchaseItem("item_ward_observer") end)
+        end
+    end
+
+    -- Smoke of Deceit
+    local hasSmoke = false
+    for i = 0, 15 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil and it:GetName() == "item_smoke_of_deceit" then hasSmoke = true end
+    end
+    if not hasSmoke and gold >= ItemCost("item_smoke_of_deceit") and FreeSlot(bot) >= 0 then
+        pcall(function() bot:Action_PurchaseItem("item_smoke_of_deceit") end)
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: CREEP AGGRO / LANE EQUILIBRIUM
+-- =========================================================================
+function Logic.ManageCreepAggro(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local allyCreeps = bb:Get("TacticalState", "NearbyAllyCreeps") or {}
+    if #enemyCreeps == 0 then return BT.FAILURE end
+
+    -- Если союзных крипов больше вражеских — атакуем вражеских чтобы пушить
+    -- Если меньше — не атакуем крипов, ждём
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    if #allyCreeps >= #enemyCreeps then
+        -- пушим: атакуем ближайшего вражеского крипа
+        local t = FindLowestHPUnit(enemyCreeps)
+        if t ~= nil then
+            local d = Distance(bot:GetLocation(), t:GetLocation())
+            if d <= attackRange + 60 then
+                bot:Action_AttackUnit(t, true)
+                return BT.RUNNING
+            end
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: STACKING CAMPS
+-- =========================================================================
+function Logic.StackCamps(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- Стекаем нейтральный кемп за ~53 секунды до полной минуты
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    local sec = time % 60
+    if sec < 50 or sec > 56 then return BT.FAILURE end
+
+    local neutrals = bb:Get("TacticalState", "NearbyNeutralCreeps") or {}
+    if #neutrals == 0 then return BT.FAILURE end
+
+    -- находим кемп (первый нейтрал)
+    local camp = neutrals[1]
+    if camp == nil then return BT.FAILURE end
+    local cLoc = camp:GetLocation()
+    -- отводим крипов от кемпа за 5 сек до минуты
+    local away = cLoc + (bot:GetLocation() - cLoc):Normalized() * 400
+    -- если крипы рядом с нами — отводим
+    local nDist = Distance(bot:GetLocation(), cLoc)
+    if nDist < 200 then
+        bot:Action_MoveToLocation(away)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: PULLING
+-- =========================================================================
+function Logic.Pull(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local allyCreeps = bb:Get("TacticalState", "NearbyAllyCreeps") or {}
+    -- Пуллим если есть союзные и вражеские крипы на линии
+    if #allyCreeps == 0 or #enemyCreeps == 0 then return BT.FAILURE end
+
+    -- атакуем вражеского крипа чтобы привлечь внимание, потом отводим
+    local target = FindLowestHPUnit(enemyCreeps)
+    if target == nil then return BT.FAILURE end
+    local d = Distance(bot:GetLocation(), target:GetLocation())
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    if d <= attackRange + 60 then
+        bot:Action_AttackUnit(target, true)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: GANKING (smoke + TP)
+-- =========================================================================
+function Logic.Gank(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.6 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    -- ганкаем если нет врагов рядом (мы в дыму или вне видимости)
+    if #enemies > 0 then return BT.FAILURE end
+
+    -- Используем smoke если есть
+    local smoke, _ = HasItem(bot, "item_smoke_of_deceit")
+    if smoke ~= nil and smoke:GetCooldownTimeRemaining() <= 0 then
+        pcall(function() bot:Action_UseAbility(smoke) end)
+        return BT.RUNNING
+    end
+
+    -- Ищем цель для ганка: вражеский герой с низким HP на карте
+    -- Используем GetUnitList
+    local target = nil
+    local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ENEMY_HEROES) end)
+    if ok and units ~= nil then
+        for i = 1, #units do
+            local u = units[i]
+            if u ~= nil and u:IsAlive() and not u:IsInvulnerable() then
+                local uHP = u:GetHealth() / u:GetMaxHealth()
+                if uHP < 0.5 then
+                    target = u
+                    break
+                end
+            end
+        end
+    end
+    if target == nil then return BT.FAILURE end
+
+    -- TP к ближайшей башне/союзному герою рядом с целью
+    local tp, _ = HasItem(bot, "item_tpscroll")
+    if tp ~= nil and tp:GetCooldownTimeRemaining() <= 0 then
+        -- TP к локации цели (приблизительно)
+        pcall(function() bot:Action_UseAbilityOnLocation(tp, target:GetLocation()) end)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: MAP AWARENESS (пропавшие враги)
+-- =========================================================================
+function Logic.MapAwareness(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    local hp = bb:Get("SelfState", "HP") or 1.0
+
+    -- Если врагов мало рядом, но игра в мид/лейт — возможный ганк
+    local phase = bb:Get("MacroState", "GamePhase") or "laning"
+    if phase ~= "laning" and #enemies == 0 and #allies <= 1 then
+        -- отступаем к безопасной позиции
+        local fountain = GetFountainLoc(bot)
+        if fountain ~= nil and hp < 0.6 then
+            bot:Action_MoveToLocation(fountain)
+            return BT.RUNNING
+        end
+    end
+
+    -- Если врагов много рядом — отступаем
+    if #enemies >= 3 and #allies < #enemies then
+        local fountain = GetFountainLoc(bot)
+        if fountain ~= nil then
+            bot:Action_MoveToLocation(fountain)
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: REACTIVE ITEMS (Manta, Linken и т.д.)
+-- =========================================================================
+function Logic.ReactiveItems(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- Manta: снимаем сайленс/хекс
+    local manta, _ = HasItem(bot, "item_manta")
+    if manta ~= nil then
+        local ready = manta:GetCooldownTimeRemaining() <= 0
+        if ready and (bot:IsSilenced() or bot:IsHexed()) then
+            pcall(function() bot:Action_UseAbility(manta) end)
+            return BT.RUNNING
+        end
+    end
+    -- Eul's: снимаем сайленс на себя или врага
+    local euls, _ = HasItem(bot, "item_cyclone")
+    if euls ~= nil then
+        local ready = euls:GetCooldownTimeRemaining() <= 0
+        if ready and bot:IsSilenced() then
+            pcall(function() bot:Action_UseAbilityOnEntity(euls, bot) end)
+            return BT.RUNNING
+        end
+    end
+    -- Glimmer Cape: невидимость при угрозе
+    local glimmer, _ = HasItem(bot, "item_glimmer_cape")
+    if glimmer ~= nil then
+        local ready = glimmer:GetCooldownTimeRemaining() <= 0
+        local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+        local hp = bb:Get("SelfState", "HP") or 1.0
+        if ready and #enemies > 0 and hp < 0.4 then
+            pcall(function() bot:Action_UseAbilityOnEntity(glimmer, bot) end)
+            return BT.RUNNING
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
 -- BUILD BEHAVIOR TREE
 -- =========================================================================
 function BuildBehaviorTree()
@@ -940,6 +1330,59 @@ function BuildBehaviorTree()
         execute = function(npcBot, blackboard)
             return Logic.Retreat(blackboard)
         end
+    })
+
+    local actItems = BT.Action:new({
+        name = "ExecuteUseItems",
+        execute = function(npcBot, blackboard) return Logic.UseItems(blackboard) end
+    })
+    local actReactive = BT.Action:new({
+        name = "ExecuteReactiveItems",
+        execute = function(npcBot, blackboard) return Logic.ReactiveItems(blackboard) end
+    })
+    local actWard2 = BT.Action:new({
+        name = "ExecutePlaceWard2",
+        execute = function(npcBot, blackboard) return Logic.PlaceWard(blackboard) end
+    })
+    local actRune2 = BT.Action:new({
+        name = "ExecuteCollectRune2",
+        execute = function(npcBot, blackboard) return Logic.CollectRune(blackboard) end
+    })
+    local actRoshan2 = BT.Action:new({
+        name = "ExecuteRoshan2",
+        execute = function(npcBot, blackboard) return Logic.Roshan(blackboard) end
+    })
+    local actPush2 = BT.Action:new({
+        name = "ExecutePushObjective2",
+        execute = function(npcBot, blackboard) return Logic.PushObjective(blackboard) end
+    })
+    local actDefend2 = BT.Action:new({
+        name = "ExecuteDefendBase2",
+        execute = function(npcBot, blackboard) return Logic.DefendBase(blackboard) end
+    })
+    local actTeamFight2 = BT.Action:new({
+        name = "ExecuteTeamFight2",
+        execute = function(npcBot, blackboard) return Logic.TeamFight(blackboard) end
+    })
+    local actMapAware = BT.Action:new({
+        name = "ExecuteMapAwareness",
+        execute = function(npcBot, blackboard) return Logic.MapAwareness(blackboard) end
+    })
+    local actGank = BT.Action:new({
+        name = "ExecuteGank",
+        execute = function(npcBot, blackboard) return Logic.Gank(blackboard) end
+    })
+    local actCreepAggro = BT.Action:new({
+        name = "ExecuteCreepAggro",
+        execute = function(npcBot, blackboard) return Logic.ManageCreepAggro(blackboard) end
+    })
+    local actStack = BT.Action:new({
+        name = "ExecuteStackCamps",
+        execute = function(npcBot, blackboard) return Logic.StackCamps(blackboard) end
+    })
+    local actPull = BT.Action:new({
+        name = "ExecutePull",
+        execute = function(npcBot, blackboard) return Logic.Pull(blackboard) end
     })
 
     local actCombat = BT.Action:new({
@@ -1007,23 +1450,48 @@ function BuildBehaviorTree()
         end
     })
 
+    -- Conditions
+    local condHasWard2 = BT.Condition:new({
+        name = "CheckHasWard2",
+        eval = function(npcBot, blackboard)
+            local bot = blackboard:GetBotRef()
+            if bot == nil then return false end
+            for i = 0, 15 do
+                local it = bot:GetItemInSlot(i)
+                if it ~= nil then
+                    local n = it:GetName()
+                    if n == "item_ward_observer" or n == "item_ward_sentry" then return true end
+                end
+            end
+            return false
+        end
+    })
+
     -- Sequences
     local seqRetreat = BT.BuildSequence("EmergencyRetreat", { condLowHP, actRetreat })
+    local seqReactive = BT.BuildSequence("ReactiveItems", { actReactive })
     local seqKill    = BT.BuildSequence("KillHero", { condKillTarget, actCombat })
-    local seqTeamFight = BT.BuildSequence("TeamFight", { condTeamFight, actTeamFight })
-    local seqRoshan  = BT.BuildSequence("Roshan", { actRoshan })
-    local seqPush    = BT.BuildSequence("PushObjective", { condShouldPush, actPush })
-    local seqDefend  = BT.BuildSequence("DefendBase", { actDefend })
+    local seqTeamFight = BT.BuildSequence("TeamFight", { condTeamFight, actTeamFight2 })
+    local seqDefend  = BT.BuildSequence("DefendBase", { actDefend2 })
+    local seqPush    = BT.BuildSequence("PushObjective", { condShouldPush, actPush2 })
+    local seqGank    = BT.BuildSequence("Gank", { actGank })
+    local seqMapAware = BT.BuildSequence("MapAwareness", { actMapAware })
+    local seqRoshan  = BT.BuildSequence("Roshan", { actRoshan2 })
     local seqCombat  = BT.BuildSequence("MicroCombat", { condEnemyHero, actCombat })
-    local seqWard    = BT.BuildSequence("PlaceWard", { condHasWard, actWard })
-    local seqRune    = BT.BuildSequence("CollectRune", { actRune })
+    local seqWard    = BT.BuildSequence("PlaceWard", { condHasWard2, actWard2 })
+    local seqRune    = BT.BuildSequence("CollectRune", { actRune2 })
+    local seqCreepAggro = BT.BuildSequence("CreepAggro", { actCreepAggro })
+    local seqStack   = BT.BuildSequence("StackCamps", { actStack })
+    local seqPull    = BT.BuildSequence("Pull", { actPull })
+    local seqItems   = BT.BuildSequence("UseItems", { actItems })
     local seqCreep   = BT.BuildSequence("CreepMicro", { condCreeps, actFarm })
     local seqLane    = BT.BuildSequence("IdleLaningMacro", { actLane })
 
-    -- Root Selector: приоритет retreat > kill > teamfight > defend > push > combat > ward > rune > farm > lane
+    -- Root Selector
     local root = BT.BuildSelector("RootSelector", {
-        seqRetreat, seqKill, seqTeamFight, seqDefend, seqPush, seqCombat,
-        seqWard, seqRune, seqCreep, seqLane, seqRoshan
+        seqRetreat, seqReactive, seqKill, seqTeamFight, seqDefend, seqPush,
+        seqGank, seqMapAware, seqRoshan, seqCombat, seqWard, seqRune,
+        seqCreepAggro, seqStack, seqPull, seqItems, seqCreep, seqLane
     })
     return root
 end
@@ -1036,7 +1504,11 @@ function Think()
     SyncBlackboard()
     Logic.UpdateMacro(Blackboard)
     Logic.BuyItems(Blackboard)
+    Logic.BuyConsumables(Blackboard)
+    Logic.LevelAbilities(Blackboard)
     Logic.FindKillTarget(Blackboard)
+    Logic.ReactiveItems(Blackboard)
+    Logic.MapAwareness(Blackboard)
     if rootTree ~= nil then
         rootTree:Tick(thisBot, Blackboard)
     end
