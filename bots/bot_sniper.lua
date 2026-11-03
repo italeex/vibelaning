@@ -4775,10 +4775,443 @@ function Logic.RetreatPath(bb)
     return BT.RUNNING
 end
 
+-- =========================================================================
+-- ЛОГИКА: STAT TRACKING (статистика)
+-- =========================================================================
+function Logic.StatTracking(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local kills = 0
+    local deaths = 0
+    local assists = 0
+    local ok, k = pcall(function() return bot:GetKills() end)
+    if ok and type(k) == "number" then kills = k end
+    local ok2, d = pcall(function() return bot:GetDeaths() end)
+    if ok2 and type(d) == "number" then deaths = d end
+    local ok3, a = pcall(function() return bot:GetAssists() end)
+    if ok3 and type(a) == "number" then assists = a end
+    bb:Set("SelfState", "Kills", kills)
+    bb:Set("SelfState", "Deaths", deaths)
+    bb:Set("SelfState", "Assists", assists)
+    local kda = (deaths > 0) and ((kills + assists) / deaths) or (kills + assists)
+    bb:Set("SelfState", "KDA", kda)
+end
+
+-- =========================================================================
+-- ЛОГИКА: WIN PROBABILITY
+-- =========================================================================
+function Logic.WinProbability(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0.5 end
+    local kills = bb:Get("SelfState", "Kills") or 0
+    local deaths = bb:Get("SelfState", "Deaths") or 0
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    local prob = 0.5
+    if kills > deaths + 3 then prob = prob + 0.1 end
+    if deaths > kills + 3 then prob = prob - 0.1 end
+    if time > 1800 then
+        -- лейтгейм: проверяем троны
+        local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ALL) end)
+        if ok and units ~= nil then
+            local enemyThrone = nil
+            local allyThrone = nil
+            for i = 1, #units do
+                local u = units[i]
+                if u ~= nil and u:IsAlive() and u:IsAncient() then
+                    if u:GetTeam() == bot:GetTeam() then allyThrone = u
+                    else enemyThrone = u end
+                end
+            end
+            if allyThrone ~= nil and enemyThrone ~= nil then
+                local allyHP = allyThrone:GetHealth() / allyThrone:GetMaxHealth()
+                local enemyHP = enemyThrone:GetHealth() / enemyThrone:GetMaxHealth()
+                prob = prob + (enemyHP - allyHP) * 0.3
+            end
+        end
+    end
+    bb:Set("MacroState", "WinProbability", prob)
+    return prob
+end
+
+-- =========================================================================
+-- ЛОГИКА: GAME STATE EVALUATION
+-- =========================================================================
+function Logic.GameStateEvaluation(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return "neutral" end
+    local prob = bb:Get("MacroState", "WinProbability") or 0.5
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    local state = "neutral"
+    if prob > 0.65 then state = "winning"
+    elseif prob < 0.35 then state = "losing"
+    else state = "even" end
+    bb:Set("MacroState", "GameState", state)
+    return state
+end
+
+-- =========================================================================
+-- ЛОГИКА: STRATEGY ADAPTATION
+-- =========================================================================
+function Logic.StrategyAdaptation(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local state = bb:Get("MacroState", "GameState") or "neutral"
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    if state == "winning" then
+        bb:Set("MacroState", "Strategy", "push")
+    elseif state == "losing" then
+        bb:Set("MacroState", "Strategy", "defend")
+    else
+        if time < 900 then bb:Set("MacroState", "Strategy", "farm")
+        else bb:Set("MacroState", "Strategy", "balanced") end
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: PUSH PRIORITY
+-- =========================================================================
+function Logic.PushPriority(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local strategy = bb:Get("MacroState", "Strategy") or "farm"
+    local score = 0
+    if strategy == "push" then score = 80 end
+    if strategy == "balanced" then score = 40 end
+    if strategy == "defend" then score = 10 end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then score = score - 30 end
+    bb:Set("SelfState", "PushPriority", score)
+    return score
+end
+
+-- =========================================================================
+-- ЛОГИКА: DEFEND PRIORITY
+-- =========================================================================
+function Logic.DefendPriority(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local strategy = bb:Get("MacroState", "Strategy") or "farm"
+    local score = 0
+    if strategy == "defend" then score = 80 end
+    if strategy == "balanced" then score = 40 end
+    if strategy == "push" then score = 10 end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local fountain = GetFountainLoc(bot)
+    if fountain ~= nil then
+        for i = 1, #enemyCreeps do
+            local c = enemyCreeps[i]
+            if c ~= nil and c:IsAlive() and Distance(c:GetLocation(), fountain) < 2500 then
+                score = score + 20
+            end
+        end
+    end
+    bb:Set("SelfState", "DefendPriority", score)
+    return score
+end
+
+-- =========================================================================
+-- ЛОГИКА: FARM PRIORITY (макро)
+-- =========================================================================
+function Logic.FarmPriorityMacro(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local strategy = bb:Get("MacroState", "Strategy") or "farm"
+    local score = 0
+    if strategy == "farm" then score = 90 end
+    if strategy == "balanced" then score = 50 end
+    if strategy == "push" then score = 20 end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    if time < 600 then score = score + 20 end
+    bb:Set("SelfState", "FarmPriorityMacro", score)
+    return score
+end
+
+-- =========================================================================
+-- ЛОГИКА: KILL PRIORITY (макро)
+-- =========================================================================
+function Logic.KillPriorityMacro(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local killProb = bb:Get("TacticalState", "KillProbability") or 0
+    local score = killProb * 100
+    local aggro = bb:Get("SelfState", "AggressionLevel") or 0
+    score = score + aggro * 5
+    bb:Set("SelfState", "KillPriorityMacro", score)
+    return score
+end
+
+-- =========================================================================
+-- ЛОГИКА: MACRO DECISION
+-- =========================================================================
+function Logic.MacroDecision(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return "FARM" end
+    local farmP = bb:Get("SelfState", "FarmPriorityMacro") or 0
+    local killP = bb:Get("SelfState", "KillPriorityMacro") or 0
+    local pushP = bb:Get("SelfState", "PushPriority") or 0
+    local defP = bb:Get("SelfState", "DefendPriority") or 0
+    local def = bb:Get("SelfState", "DefensiveLevel") or 0
+    if def >= 4 then return "RETREAT" end
+    if defP > 60 then return "DEFEND" end
+    if killP > 60 then return "KILL" end
+    if pushP > 60 then return "PUSH" end
+    if farmP > 60 then return "FARM" end
+    return "LANE"
+end
+
+-- =========================================================================
+-- ЛОГИКА: EXECUTE MACRO DECISION
+-- =========================================================================
+function Logic.ExecuteMacroDecision(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local decision = Logic.MacroDecision(bb)
+    bb:Set("MacroState", "CurrentDecision", decision)
+    if decision == "RETREAT" then
+        return Logic.SmartRetreat(bb)
+    elseif decision == "KILL" then
+        return Logic.KillSecure(bb)
+    elseif decision == "PUSH" then
+        return Logic.AggressivePush(bb)
+    elseif decision == "DEFEND" then
+        return Logic.DefendBase(bb)
+    elseif decision == "FARM" then
+        return Logic.FarmingEfficiency(bb)
+    else
+        return Logic.Lane(bb)
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: ADAPTIVE BEHAVIOR
+-- =========================================================================
+function Logic.AdaptiveBehavior(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local state = bb:Get("MacroState", "GameState") or "neutral"
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    -- адаптируем поведение под состояние игры
+    if state == "losing" then
+        bb:Set("MacroState", "Aggression", "low")
+        bb:Set("MacroState", "FarmPriority", "high")
+    elseif state == "winning" then
+        bb:Set("MacroState", "Aggression", "high")
+        bb:Set("MacroState", "FarmPriority", "low")
+    else
+        bb:Set("MacroState", "Aggression", "medium")
+        bb:Set("MacroState", "FarmPriority", "medium")
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: TEAM FIGHT AWARENESS
+-- =========================================================================
+function Logic.TeamFightAwareness(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local inTF = (#allies >= 2 and #enemies >= 2)
+    bb:Set("TacticalState", "IsInTeamFight", inTF)
+    if inTF then
+        bb:Set("MacroState", "InTeamFight", true)
+    else
+        bb:Set("MacroState", "InTeamFight", false)
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: OBJECTIVE CONTROL
+-- =========================================================================
+function Logic.ObjectiveControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local strategy = bb:Get("MacroState", "Strategy") or "farm"
+    if strategy ~= "push" then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end
+    -- ищем ближайшую вражескую башню
+    local ok, units = pcall(function() return GetUnitList(UNIT_LIST_ENEMY) end)
+    if not ok or units == nil then return BT.FAILURE end
+    local tower = nil
+    local bestDist = 1e9
+    for i = 1, #units do
+        local u = units[i]
+        if u ~= nil and u:IsAlive() and u:IsTower() then
+            local d = Distance(bot:GetLocation(), u:GetLocation())
+            if d < bestDist then bestDist = d; tower = u end
+        end
+    end
+    if tower == nil then return BT.FAILURE end
+    local d = Distance(bot:GetLocation(), tower:GetLocation())
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    if d <= attackRange + 80 then
+        bot:Action_AttackUnit(tower, true)
+        return BT.RUNNING
+    else
+        bot:Action_MoveToLocation(tower:GetLocation())
+        return BT.RUNNING
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: FOUNTAIN CONTROL
+-- =========================================================================
+function Logic.FountainControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local mp = bb:Get("SelfState", "MP") or 1.0
+    if hp > 0.9 and mp > 0.9 then return BT.FAILURE end
+    local fountain = GetFountainLoc(bot)
+    if fountain == nil then return BT.FAILURE end
+    local d = Distance(bot:GetLocation(), fountain)
+    if d <= 200 then
+        return BT.SUCCESS  -- стоим на фонтане
+    end
+    if hp < 0.5 or mp < 0.5 then
+        bot:Action_MoveToLocation(fountain)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: RUNE CONTROL
+-- =========================================================================
+function Logic.RuneControl(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    -- проверяем руны каждые 2 минуты
+    if time % 120 > 15 then return BT.FAILURE end
+    local runes = {}
+    local ok, r = pcall(function() return GetRuneLocations() end)
+    if ok and r ~= nil then runes = r end
+    if #runes == 0 then return BT.FAILURE end
+    local myPos = bot:GetLocation()
+    local best, bestDist = nil, 1e9
+    for i = 1, #runes do
+        local rl = runes[i]
+        local loc = (type(rl) == "table") and (rl.location or rl) or rl
+        if loc ~= nil then
+            local d = Distance(myPos, loc)
+            if d < bestDist then bestDist = d; best = loc end
+        end
+    end
+    if best == nil then return BT.FAILURE end
+    bot:Action_MoveToLocation(best)
+    return BT.RUNNING
+end
+
 function Think()
     if not InitializeBot() then return end
     SyncBlackboard()
     Logic.SelectLane(Blackboard)
+    Logic.LaneRotation(Blackboard)
+    Logic.CalculateDamage(Blackboard)
+    Logic.BurstDamage(Blackboard)
+    Logic.SelectBestTarget(Blackboard)
+    Logic.CooldownTracking(Blackboard)
+    Logic.ThreatAssessment(Blackboard)
+    Logic.DynamicRetreatThreshold(Blackboard)
+    Logic.FarmEfficiencyScore(Blackboard)
+    Logic.KillProbability(Blackboard)
+    Logic.HeroPowerSpike(Blackboard)
+    Logic.AggressionLevel(Blackboard)
+    Logic.DefensiveLevel(Blackboard)
+    Logic.FarmPriorityScore(Blackboard)
+    Logic.KillPriorityScore(Blackboard)
+    Logic.ObjectivePriorityScore(Blackboard)
+    Logic.DecisionEngine(Blackboard)
+    Logic.EconomyOptimization(Blackboard)
+    Logic.ItemEfficiency(Blackboard)
+    Logic.CounterPickAwareness(Blackboard)
+    Logic.StatTracking(Blackboard)
+    Logic.WinProbability(Blackboard)
+    Logic.GameStateEvaluation(Blackboard)
+    Logic.StrategyAdaptation(Blackboard)
+    Logic.TeamFightAwareness(Blackboard)
+    Logic.PushPriority(Blackboard)
+    Logic.DefendPriority(Blackboard)
+    Logic.FarmPriorityMacro(Blackboard)
+    Logic.KillPriorityMacro(Blackboard)
+    Logic.MacroDecision(Blackboard)
+    Logic.AdaptiveBehavior(Blackboard)
+    Logic.UpdateMacro(Blackboard)
+    Logic.DynamicItemBuild(Blackboard)
+    Logic.AdaptItemBuild(Blackboard)
+    Logic.BuyItems(Blackboard)
+    Logic.BuyConsumables(Blackboard)
+    Logic.UpgradeItems(Blackboard)
+    Logic.SellItems(Blackboard)
+    Logic.LevelAbilities(Blackboard)
+    Logic.FindKillTarget(Blackboard)
+    Logic.BuybackDecision(Blackboard)
+    Logic.ReactiveItems(Blackboard)
+    Logic.MapAwareness(Blackboard)
+    Logic.AntiGank(Blackboard)
+    Logic.CourierManagement(Blackboard)
+    Logic.RoshanTiming(Blackboard)
+    Logic.BountyRune(Blackboard)
+    Logic.PowerRune(Blackboard)
+    Logic.WisdomRune(Blackboard)
+    Logic.TPReaction(Blackboard)
+    Logic.Escape(Blackboard)
+    Logic.Reinforce(Blackboard)
+    Logic.ManaManagement(Blackboard)
+    Logic.ItemTiming(Blackboard)
+    Logic.AdvancedPull(Blackboard)
+    Logic.AntiPush(Blackboard)
+    Logic.BaseRace(Blackboard)
+    Logic.HighGroundDefense(Blackboard)
+    Logic.TeamCoordination(Blackboard)
+    Logic.ObjectivePriority(Blackboard)
+    Logic.SplitPush(Blackboard)
+    Logic.DefensiveTeleport(Blackboard)
+    Logic.WardRefresh(Blackboard)
+    Logic.StackTiming(Blackboard)
+    Logic.LanePressure(Blackboard)
+    Logic.TPToLane(Blackboard)
+    Logic.JungleFarmEfficiency(Blackboard)
+    Logic.KillSecure(Blackboard)
+    Logic.EnemyAbilityAwareness(Blackboard)
+    Logic.FightOrFlight(Blackboard)
+    Logic.PositionInFight(Blackboard)
+    Logic.AutoAttackControl(Blackboard)
+    Logic.ShrapnelOnWave(Blackboard)
+    Logic.AssassinateLowTarget(Blackboard)
+    Logic.CombatItemUsage(Blackboard)
+    Logic.FarmingEfficiency(Blackboard)
+    Logic.LaneControl(Blackboard)
+    Logic.DefensiveRetreat(Blackboard)
+    Logic.AggressivePush(Blackboard)
+    Logic.FarmAndFight(Blackboard)
+    Logic.LaneSwap(Blackboard)
+    Logic.TowerProtect(Blackboard)
+    Logic.HighGroundSiege(Blackboard)
+    Logic.FountainHealing(Blackboard)
+    Logic.UseConsumables(Blackboard)
+    Logic.UseSmoke(Blackboard)
+    Logic.UseRefresher2(Blackboard)
+    Logic.VisionControl(Blackboard)
+    Logic.Peeling(Blackboard)
+    Logic.Initiation(Blackboard)
+    Logic.SmartRetreat(Blackboard)
+    Logic.CreepAggroControl(Blackboard)
+    Logic.LaneEquilibriumAdvanced(Blackboard)
+    Logic.DamageMitigation(Blackboard)
+    Logic.SaveAlly(Blackboard)
+    Logic.TowerDive(Blackboard)
+    Logic.RetreatPath(Blackboard)
+    Logic.ExecuteMacroDecision(Blackboard)
+    Logic.ObjectiveControl(Blackboard)
+    Logic.FountainControl(Blackboard)
+    Logic.RuneControl(Blackboard)
+    if rootTree ~= nil then
+        rootTree:Tick(thisBot, Blackboard)
+    end
+end
     Logic.LaneRotation(Blackboard)
     Logic.CalculateDamage(Blackboard)
     Logic.BurstDamage(Blackboard)
