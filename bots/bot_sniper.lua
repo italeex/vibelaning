@@ -3965,6 +3965,296 @@ function Logic.FarmAndFight(bb)
     return BT.FAILURE
 end
 
+-- =========================================================================
+-- ЛОГИКА: DYNAMIC RETREAT THRESHOLD
+-- =========================================================================
+function Logic.DynamicRetreatThreshold(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0.3 end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    local allies = bb:Get("TacticalState", "NearbyAllyHeroes") or {}
+    local threat = bb:Get("TacticalState", "ActiveThreatLevel") or 0
+    local threshold = 0.3
+    if #enemies > #allies then threshold = 0.4 end
+    if threat >= 3 then threshold = 0.5 end
+    if threat >= 5 then threshold = 0.6 end
+    bb:Set("SelfState", "RetreatThreshold", threshold)
+    return threshold
+end
+
+-- =========================================================================
+-- ЛОГИКА: FARM EFFICIENCY SCORE
+-- =========================================================================
+function Logic.FarmEfficiencyScore(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local neutrals = bb:Get("TacticalState", "NearbyNeutralCreeps") or {}
+    local score = #enemyCreeps * 10 + #neutrals * 5
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.5 then score = score * 0.5 end
+    bb:Set("SelfState", "FarmScore", score)
+    return score
+end
+
+-- =========================================================================
+-- ЛОГИКА: KILL PROBABILITY
+-- =========================================================================
+function Logic.KillProbability(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return 0 end
+    local target = bb:Get("TacticalState", "TargetEnemyHero")
+    if target == nil or not target:IsAlive() then return 0 end
+    local burst = bb:Get("SelfState", "BurstDamage") or 0
+    local targetHP = target:GetHealth()
+    local prob = 0
+    if burst >= targetHP then prob = 0.9
+    elseif burst >= targetHP * 0.7 then prob = 0.6
+    elseif burst >= targetHP * 0.4 then prob = 0.3
+    else prob = 0.1 end
+    -- корректируем на дистанцию
+    local dist = Distance(bot:GetLocation(), target:GetLocation())
+    local attackRange = bb:Get("SelfState", "AttackRange") or 550
+    if dist > attackRange * 2 then prob = prob * 0.5 end
+    bb:Set("TacticalState", "KillProbability", prob)
+    return prob
+end
+
+-- =========================================================================
+-- ЛОГИКА: LANE SWAP
+-- =========================================================================
+function Logic.LaneSwap(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local time = bb:Get("MacroState", "CurrentGameTime") or 0
+    if time < 300 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end
+    -- если на линии слишком много врагов — меняем линию
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    if #enemyCreeps > 8 then
+        local currentLane = bb:Get("MacroState", "ActiveLane")
+        local newLane = LANE_MID
+        if currentLane == LANE_MID then newLane = LANE_TOP end
+        if currentLane == LANE_TOP then newLane = LANE_BOT end
+        if currentLane == LANE_BOT then newLane = LANE_TOP end
+        bb:Set("MacroState", "ActiveLane", newLane)
+        bb:Set("MacroState", "FarmLane", newLane)
+        return BT.SUCCESS
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: TOWER PROTECT
+-- =========================================================================
+function Logic.TowerProtect(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local allyTowers = bb:Get("TacticalState", "NearbyAllyTowers") or {}
+    local enemyCreeps = bb:Get("TacticalState", "NearbyEnemyCreeps") or {}
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    -- если враги атакуют нашу башню
+    local towerUnderAttack = false
+    for i = 1, #allyTowers do
+        local t = allyTowers[i]
+        if t ~= nil and t:IsAlive() then
+            -- проверяем HP башни
+            if t:GetHealth() / t:GetMaxHealth() < 0.5 then
+                towerUnderAttack = true
+                break
+            end
+        end
+    end
+    if not towerUnderAttack then return BT.FAILURE end
+    if #enemies > 0 and #enemyCreeps == 0 then return BT.FAILURE end
+    -- атакуем вражеских крипов у башни
+    local t = FindLowestHPUnit(enemyCreeps)
+    if t ~= nil then
+        bot:Action_AttackUnit(t, true)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: HIGH GROUND SIEGE
+-- =========================================================================
+function Logic.HighGroundSiege(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end
+    local enemyTowers = bb:Get("TacticalState", "NearbyEnemyTowers") or {}
+    if #enemyTowers == 0 then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.6 then return BT.FAILURE end
+    -- атакуем башню
+    local t = FindLowestHPUnit(enemyTowers)
+    if t ~= nil then
+        bot:Action_AttackUnit(t, true)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: FOUNTAIN HEALING
+-- =========================================================================
+function Logic.FountainHealing(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local mp = bb:Get("SelfState", "MP") or 1.0
+    if hp > 0.9 and mp > 0.9 then return BT.FAILURE end
+    local fountain = GetFountainLoc(bot)
+    if fountain == nil then return BT.FAILURE end
+    local d = Distance(bot:GetLocation(), fountain)
+    if d <= 200 then
+        -- стоим на фонтане, ждём регена
+        return BT.SUCCESS
+    end
+    if hp < 0.5 or mp < 0.5 then
+        bot:Action_MoveToLocation(fountain)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: ITEM SELL (продажа ненужных предметов)
+-- =========================================================================
+function Logic.SellItems(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return end
+    local gold = bb:Get("SelfState", "Gold") or 0
+    -- если инвентарь полон и нужен слот — продаём стартовые предметы
+    local full = true
+    for i = 0, 5 do
+        if bot:GetItemInSlot(i) == nil then full = false; break end
+    end
+    if not full then return end
+    -- продаём wraith_band если есть лучший предмет
+    for i = 0, 5 do
+        local it = bot:GetItemInSlot(i)
+        if it ~= nil then
+            local n = it:GetName()
+            if n == "item_wraith_band" or n == "item_null_talisman" or n == "item_bracer" then
+                -- проверяем есть ли более дорогой предмет
+                local hasBetter = false
+                for j = 0, 5 do
+                    local it2 = bot:GetItemInSlot(j)
+                    if it2 ~= nil and it2:GetName() ~= n then
+                        local c1 = ItemCost(n)
+                        local c2 = ItemCost(it2:GetName())
+                        if c2 > c1 * 2 then hasBetter = true; break end
+                    end
+                end
+                if hasBetter then
+                    pcall(function() bot:Action_SellItem(it) end)
+                    return
+                end
+            end
+        end
+    end
+end
+
+-- =========================================================================
+-- ЛОГИКА: CONSUMABLE USAGE
+-- =========================================================================
+function Logic.UseConsumables(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    local mp = bb:Get("SelfState", "MP") or 1.0
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+
+    -- Healing Salve
+    if hp < 0.5 and #enemies == 0 then
+        for i = 0, 15 do
+            local it = bot:GetItemInSlot(i)
+            if it ~= nil and it:GetName() == "item_flask" then
+                pcall(function() bot:Action_UseAbilityOnEntity(it, bot) end)
+                return BT.RUNNING
+            end
+        end
+    end
+    -- Tango
+    if hp < 0.7 and #enemies == 0 then
+        for i = 0, 15 do
+            local it = bot:GetItemInSlot(i)
+            if it ~= nil and it:GetName() == "item_tango" then
+                -- используем на дереве
+                local trees = {}
+                local ok, t = pcall(function() return bot:GetNearbyTrees(200) end)
+                if ok and t ~= nil and #t > 0 then
+                    pcall(function() bot:Action_UseAbilityOnTree(it, t[1]) end)
+                    return BT.RUNNING
+                end
+            end
+        end
+    end
+    -- Clarity
+    if mp < 0.4 and #enemies == 0 then
+        for i = 0, 15 do
+            local it = bot:GetItemInSlot(i)
+            if it ~= nil and it:GetName() == "item_clarity" then
+                pcall(function() bot:Action_UseAbilityOnEntity(it, bot) end)
+                return BT.RUNNING
+            end
+        end
+    end
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: SMOKE USAGE
+-- =========================================================================
+function Logic.UseSmoke(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local smoke, _ = HasItem(bot, "item_smoke_of_deceit")
+    if smoke == nil or smoke:GetCooldownTimeRemaining() > 0 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies > 0 then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.6 then return BT.FAILURE end
+    -- используем smoke для ганка/ротации
+    pcall(function() bot:Action_UseAbility(smoke) end)
+    return BT.RUNNING
+end
+
+-- =========================================================================
+-- ЛОГИКА: AEGIS USAGE
+-- =========================================================================
+function Logic.UseAegis(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    -- Aegis автоматически ресает; ничего не делаем
+    return BT.FAILURE
+end
+
+-- =========================================================================
+-- ЛОГИКА: REFRESHER USAGE
+-- =========================================================================
+function Logic.UseRefresher2(bb)
+    local bot = bb:GetBotRef()
+    if bot == nil then return BT.FAILURE end
+    local ref, _ = HasItem(bot, "item_refresher")
+    if ref == nil or ref:GetCooldownTimeRemaining() > 0 then return BT.FAILURE end
+    local enemies = bb:Get("TacticalState", "NearbyEnemyHeroes") or {}
+    if #enemies < 2 then return BT.FAILURE end
+    local hp = bb:Get("SelfState", "HP") or 1.0
+    if hp < 0.4 then return BT.FAILURE end
+    -- используем если assassinate на кд
+    local assassinate = FindAbility(bot, ABILITY_ASSASSINATE)
+    if assassinate ~= nil and assassinate:GetCooldownTimeRemaining() > 5 then
+        pcall(function() bot:Action_UseAbility(ref) end)
+        return BT.RUNNING
+    end
+    return BT.FAILURE
+end
+
 function Think()
     if not InitializeBot() then return end
     SyncBlackboard()
@@ -3975,12 +4265,16 @@ function Think()
     Logic.SelectBestTarget(Blackboard)
     Logic.CooldownTracking(Blackboard)
     Logic.ThreatAssessment(Blackboard)
+    Logic.DynamicRetreatThreshold(Blackboard)
+    Logic.FarmEfficiencyScore(Blackboard)
+    Logic.KillProbability(Blackboard)
     Logic.UpdateMacro(Blackboard)
     Logic.DynamicItemBuild(Blackboard)
     Logic.AdaptItemBuild(Blackboard)
     Logic.BuyItems(Blackboard)
     Logic.BuyConsumables(Blackboard)
     Logic.UpgradeItems(Blackboard)
+    Logic.SellItems(Blackboard)
     Logic.LevelAbilities(Blackboard)
     Logic.FindKillTarget(Blackboard)
     Logic.BuybackDecision(Blackboard)
@@ -4023,6 +4317,14 @@ function Think()
     Logic.DefensiveRetreat(Blackboard)
     Logic.AggressivePush(Blackboard)
     Logic.FarmAndFight(Blackboard)
+    Logic.LaneSwap(Blackboard)
+    Logic.TowerProtect(Blackboard)
+    Logic.HighGroundSiege(Blackboard)
+    Logic.FountainHealing(Blackboard)
+    Logic.UseConsumables(Blackboard)
+    Logic.UseSmoke(Blackboard)
+    Logic.UseRefresher2(Blackboard)
+    Logic.EnemyAbilityAwareness(Blackboard)
     if rootTree ~= nil then
         rootTree:Tick(thisBot, Blackboard)
     end
